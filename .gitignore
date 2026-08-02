@@ -1,0 +1,12 @@
+# 피아노 음원은 커밋하지 않는다 (31MiB). download_assets.py 로 받는다.
+# 앞의 /가 중요하다 — 없으면 web/src/assets 같은 하위 디렉터리까지 잡아
+# 웹 자산이 조용히 누락된다.
+/assets/
+
+__pycache__/
+*.py[cod]
+
+# 웹 프론트엔드
+web/node_modules/
+web/dist/
+web/dist-ds/

@@ -1,0 +1,323 @@
+@import "./tokens.css";
+
+/* 컴포넌트 스타일. 값은 전부 tokens.css의 변수를 거친다 — 여기에 색이나
+   픽셀 값을 직접 적으면 브랜딩 교체가 한 파일로 끝나지 않게 된다. */
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  color: var(--color-text);
+  background: var(--color-surface);
+  font-size: var(--text-md);
+  line-height: 1.5;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+}
+
+.app {
+  max-width: var(--app-max-width);
+  margin: 0 auto;
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-height: 100vh;
+}
+
+/* --- 네비게이션 --- */
+
+.nav {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: 32px;
+}
+
+.nav__back {
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-raised);
+  border-radius: var(--radius-sm);
+  padding: var(--space-1) var(--space-3);
+  cursor: pointer;
+  transition: border-color var(--transition);
+}
+.nav__back:hover {
+  border-color: var(--color-border-strong);
+}
+
+.nav__path {
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+}
+
+/* --- 카드 (홈의 도메인, 목록의 활동) --- */
+
+.card {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  width: 100%;
+  text-align: left;
+  padding: var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-raised);
+  cursor: pointer;
+  transition: border-color var(--transition), transform var(--transition);
+}
+.card:hover {
+  border-color: var(--color-accent);
+  transform: translateY(-1px);
+}
+.card__body {
+  flex: 1;
+  min-width: 0;
+}
+.card__title {
+  font-size: var(--text-lg);
+  font-weight: 600;
+}
+.card__summary {
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+}
+.card__badge {
+  flex: none;
+  border: 1px solid var(--color-border-strong);
+  color: var(--color-text-muted);
+  border-radius: var(--radius-pill);
+  padding: 2px var(--space-3);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+.card__badge--ready {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+/* --- 공통 --- */
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.page-title {
+  font-size: var(--text-2xl);
+  font-weight: 700;
+  margin: 0;
+}
+.muted {
+  color: var(--color-text-muted);
+}
+.spacer {
+  flex: 1;
+}
+
+.button {
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-raised);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3) var(--space-4);
+  cursor: pointer;
+  transition: border-color var(--transition);
+}
+.button:hover {
+  border-color: var(--color-accent);
+}
+.button--primary {
+  background: var(--color-accent);
+  color: var(--color-accent-text);
+  border-color: var(--color-accent);
+}
+
+.panel {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  background: var(--color-surface-raised);
+}
+
+/* --- 문항형 화면 --- */
+
+.quiz__head {
+  display: flex;
+  justify-content: space-between;
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+
+.quiz__timer {
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-sunken);
+  overflow: hidden;
+}
+.quiz__timer-fill {
+  height: 100%;
+  background: var(--color-accent);
+  transition: width 60ms linear;
+}
+.quiz__time {
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+  min-height: 1.5em;
+}
+
+.quiz__status {
+  text-align: center;
+  font-size: var(--text-xl);
+  font-weight: 700;
+  min-height: 1.4em;
+}
+.quiz__status--correct {
+  color: var(--color-correct);
+}
+.quiz__status--wrong {
+  color: var(--color-wrong);
+}
+.quiz__status--timeout {
+  color: var(--color-timeout);
+}
+.quiz__detail {
+  text-align: center;
+  color: var(--color-text-muted);
+  white-space: pre-line;
+  min-height: 3em;
+}
+
+/* --- 악보 --- */
+
+.staff {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 170px;
+  padding: var(--space-3);
+}
+/* verovio SVG는 viewBox를 갖고 나오므로 폭만 제한하면 종횡비가 유지된다.
+   Qt판에서 직접 그려야 했던 부분이 브라우저에서는 CSS 두 줄이다. */
+.staff svg {
+  max-width: 100%;
+  max-height: 170px;
+  height: auto;
+}
+
+/* verovio는 안쪽 <svg>에 color="black"을 presentation attribute로 박아 넣는다.
+   그대로 두면 어두운 테마에서 악보가 배경에 묻힌다. CSS가 presentation
+   attribute를 이기므로 여기서 덮어쓴다.
+
+   두 줄이 필요한 이유(실측): 오선·덧줄·마디선은 verovio가 넣는 <style>의
+   `stroke:currentColor`를 타므로 color만 바꿔도 따라오지만, 음표·음자리표
+   글리프는 fill 속성이 아예 없어 SVG 기본값인 검정으로 칠해진다. fill을
+   따로 지정해야 글리프까지 테마를 따른다. */
+.staff svg svg {
+  color: var(--color-text);
+  fill: currentColor;
+}
+.staff__fallback {
+  font-size: var(--text-xl);
+  font-weight: 700;
+}
+
+/* --- 음정 입력 --- */
+
+.interval__fields {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+}
+.field {
+  width: 76px;
+  height: 56px;
+  display: grid;
+  place-items: center;
+  font-size: var(--text-xl);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+}
+.field--active {
+  border: 2px solid var(--color-accent);
+}
+
+.interval__qualities {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: var(--space-2);
+}
+.interval__hint {
+  text-align: center;
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+  min-height: 1.5em;
+}
+
+/* --- 결과 --- */
+
+.result__score {
+  text-align: center;
+  font-size: var(--text-display);
+  font-weight: 700;
+}
+.result__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--text-sm);
+}
+.result__row {
+  display: flex;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-raised);
+}
+.result__mark--correct {
+  color: var(--color-correct);
+}
+.result__mark--wrong {
+  color: var(--color-wrong);
+}
+.result__answer {
+  flex: 1;
+}
+.result__meta {
+  color: var(--color-text-muted);
+}
+.result__actions {
+  display: flex;
+  gap: var(--space-3);
+}
+.result__actions .button {
+  flex: 1;
+}
+
+/* --- 준비 중 --- */
+
+.planned__section-title {
+  font-weight: 600;
+  margin-top: var(--space-4);
+}
+.planned__list {
+  margin: 0;
+  padding-left: var(--space-5);
+  color: var(--color-text-muted);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}

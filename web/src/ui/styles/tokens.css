@@ -1,0 +1,77 @@
+/**
+ * 디자인 토큰 — 브랜딩이 바뀔 때 손대는 유일한 파일.
+ *
+ * 컴포넌트는 하드코딩된 색·간격·글자크기를 갖지 않는다. 전부 이 변수를
+ * 거치므로, 브랜드가 정해지면 여기 값만 갈아끼우면 앱 전체가 따라온다.
+ *
+ * 명명 규칙
+ *   --color-*   색. surface(면) / text(글자) / border(선) / accent(강조)
+ *   --space-*   간격. 4px 배수
+ *   --text-*    글자 크기
+ *   --radius-*  모서리
+ *   --font-*    글꼴 계열
+ *
+ * 지금 값은 브랜딩 전의 중립적인 기본값이다. 아직 아무 정체성이 없는 것이
+ * 의도다 — 디자인이 정해지기 전에 임의의 색을 넣어두면 그게 기준처럼
+ * 굳어버린다.
+ */
+
+:root {
+  color-scheme: light dark;
+
+  /* 면 */
+  --color-surface: light-dark(#ffffff, #16181c);
+  --color-surface-raised: light-dark(#f6f7f9, #1e2126);
+  --color-surface-sunken: light-dark(#eceef1, #101215);
+
+  /* 글자 */
+  --color-text: light-dark(#14161a, #f2f4f7);
+  --color-text-muted: light-dark(#6b7280, #9aa3af);
+  --color-text-inverted: light-dark(#ffffff, #14161a);
+
+  /* 선 */
+  --color-border: light-dark(#d8dbe0, #2c3138);
+  --color-border-strong: light-dark(#b3b8c0, #3d434c);
+
+  /* 강조 — 브랜드 색이 들어올 자리 */
+  --color-accent: light-dark(#2f6df6, #6b9bff);
+  --color-accent-text: #ffffff;
+
+  /* 판정 */
+  --color-correct: light-dark(#1a7f4b, #4ade80);
+  --color-wrong: light-dark(#c0392b, #f87171);
+  --color-timeout: light-dark(#8a6d1f, #fbbf24);
+
+  /* 간격 */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+
+  /* 글자 크기 */
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-md: 1rem;
+  --text-lg: 1.25rem;
+  --text-xl: 1.75rem;
+  --text-2xl: 2.25rem;
+  --text-display: 3rem;
+
+  /* 모서리 */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --radius-pill: 999px;
+
+  /* 글꼴 — 브랜드 서체가 들어올 자리 */
+  --font-sans: system-ui, -apple-system, "Apple SD Gothic Neo", "Noto Sans KR",
+    sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* 레이아웃 */
+  --app-max-width: 720px;
+  --transition: 120ms ease;
+}
