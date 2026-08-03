@@ -22,3 +22,8 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# prepare_web_piano.py가 만드는 피아노 샘플 (1.3MiB, 원본은 저장소 밖)
+#   .venv/bin/python download_assets.py
+#   .venv/bin/python prepare_web_piano.py
+public/piano/

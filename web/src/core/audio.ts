@@ -18,11 +18,30 @@
 
 import type { PlayMode } from "./config";
 
-export const HARMONICS = [1.0, 0.45, 0.22, 0.1];
+/**
+ * 배음 비율.
+ *
+ * **3배음(12도 = 5도)만 유독 낮다.** 나머지 배음은 전부 옥타브 관계(1·2·4배)라
+ * 기본음과 같은 음이름이지만, 3배음은 **다른 음이름**을 만든다. 여기가
+ * 0.22였을 때 G4가 `G-G-D-G`로 울려 파워코드처럼 들렸다(실측: 오실레이터
+ * 주파수 392·784·1176·1568Hz). 음높이를 맞히는 앱에서 한 음이 화음으로 들리면
+ * 그 자체로 오답 요인이다.
+ */
+export const HARMONICS = [1.0, 0.4, 0.09, 0.06];
 const ATTACK = 0.012;
 const DECAY = 0.09;
 const SUSTAIN_LEVEL = 0.72;
 const RELEASE = 0.3;
+/**
+ * h번째 배음이 사는 시간 = duration / (h+1).
+ *
+ * 레벨이 끝까지 일정하면 귀가 배음을 **별개의 음으로 분리해서** 듣는다.
+ * 실제 악기에서 배음이 하나의 음으로 뭉쳐 들리는 이유는 위 배음일수록 빨리
+ * 사라지기 때문이다. 그 감쇠 차이를 여기서 만든다.
+ */
+function partialLife(harmonic: number, duration: number): number {
+  return duration / (harmonic + 1);
+}
 /** 아르페지오 한 음 사이 간격. melody 모드는 음 길이만큼 벌린다. */
 export const ARPEGGIO_GAP_SEC = 0.18;
 
@@ -86,26 +105,34 @@ export class SineSynth implements AudioBackend {
       const start = ctx.currentTime + i * stagger;
       const freq = midiToFreq(note);
 
-      const env = ctx.createGain();
-      env.connect(ctx.destination);
-      const g = env.gain;
-      g.setValueAtTime(0, start);
-      g.linearRampToValueAtTime(level, start + ATTACK);
-      g.linearRampToValueAtTime(level * SUSTAIN_LEVEL, start + ATTACK + DECAY);
-      g.setValueAtTime(level * SUSTAIN_LEVEL, start + Math.max(duration - RELEASE, 0));
-      g.linearRampToValueAtTime(0, start + duration);
-
+      // 배음마다 자기 포락선을 갖는다. 하나의 포락선을 공유하면 모든 배음이
+      // 끝까지 같은 레벨로 울려 서로 다른 음처럼 분리되어 들린다.
       HARMONICS.forEach((amp, h) => {
         const partial = freq * (h + 1);
         // 나이퀴스트를 넘는 배음은 앨리어싱만 만든다
         if (partial >= ctx.sampleRate / 2) return;
+
+        const peak = level * (amp / harmonicSum);
+        const life = partialLife(h, duration);
+        // 자동화 이벤트의 시각이 뒤집히지 않도록 순서를 강제한다
+        const decayed = start + ATTACK + DECAY;
+        const hold = Math.max(start + life - RELEASE, decayed);
+        const end = Math.max(start + life, hold + ATTACK);
+
+        const env = ctx.createGain();
+        env.connect(ctx.destination);
+        const g = env.gain;
+        g.setValueAtTime(0, start);
+        g.linearRampToValueAtTime(peak, start + ATTACK);
+        g.linearRampToValueAtTime(peak * SUSTAIN_LEVEL, decayed);
+        g.setValueAtTime(peak * SUSTAIN_LEVEL, hold);
+        g.linearRampToValueAtTime(0, end);
+
         const osc = ctx.createOscillator();
         osc.frequency.value = partial;
-        const mix = ctx.createGain();
-        mix.gain.value = amp / harmonicSum;
-        osc.connect(mix).connect(env);
+        osc.connect(env);
         osc.start(start);
-        osc.stop(start + duration + 0.02);
+        osc.stop(end + 0.02);
         this.active.push(osc);
         osc.onended = () => {
           this.active = this.active.filter((n) => n !== osc);

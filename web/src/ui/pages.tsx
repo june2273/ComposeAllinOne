@@ -11,7 +11,7 @@
  * 코드 학습(연주형)이나 분석 콘솔(도구)을 여기에 태우지 말 것.
  */
 
-import { useEffect } from "react";
+import { useCallback, useEffect } from "react";
 
 import {
   type Activity,
@@ -22,7 +22,7 @@ import {
   counts,
   isReady,
 } from "../core/catalog";
-import { type SessionConfig, Stage } from "../core/config";
+import type { SessionConfig } from "../core/config";
 import {
   type IntervalResponse,
   isIntervalResponse,
@@ -34,6 +34,7 @@ import type { AudioBackend } from "../core/audio";
 import {
   Button,
   Card,
+  DeviceStatus,
   PageHeading,
   PlannedNotice,
   ScoreSummary,
@@ -41,10 +42,13 @@ import {
   Stack,
   TimerBar,
   Verdict,
+  type DeviceState,
   type ScoreRowProps,
   type VerdictTone,
 } from "../ds";
-import { stageFor } from "./stages";
+import type { MidiEnv, MidiStatus } from "../platform/midi";
+import { stageFor, usesMidiInput } from "./stages";
+import { useMidi } from "./useMidi";
 import { useSession } from "./useSession";
 
 // --- 홈 / 목록 / 준비 중 -------------------------------------------------------
@@ -124,17 +128,39 @@ function answerLabel(response: unknown): string {
   return String(response);
 }
 
+/** MIDI 상태를 화면의 점 색으로. `ready`만 초록이다. */
+const DEVICE_STATE: Record<MidiStatus, DeviceState> = {
+  ready: "ok",
+  requesting: "warn",
+  "no-device": "warn",
+  denied: "warn",
+  unsupported: "off",
+  insecure: "off",
+  error: "off",
+};
+
 export function QuizPage({
   config,
   audio,
   onFinished,
+  midiEnv,
 }: {
   config: SessionConfig;
   audio: AudioBackend;
   onFinished: (results: Result[]) => void;
+  /** 테스트가 가짜 MIDIAccess를 넣는 자리. 앱에서는 넘기지 않는다 */
+  midiEnv?: MidiEnv;
 }) {
   const { view, start, replay, respond, noteOn } = useSession(config, audio);
   const StageView = stageFor(config.stage);
+  const midiStage = usesMidiInput(config.stage);
+
+  // 건반 → Session.collect(). 자판 폴백과 정확히 같은 경로를 지난다.
+  const midi = useMidi(
+    midiStage,
+    useCallback((note: number, velocity: number) => noteOn(note, velocity), [noteOn]),
+    midiEnv,
+  );
 
   useEffect(() => {
     start();
@@ -161,8 +187,8 @@ export function QuizPage({
         return;
       }
       // 음정 스테이지는 같은 글자키를 성질 선택에 쓰므로 자판 폴백을 끈다
-      // (stages.tsx가 먼저 가져간다).
-      if (config.stage === Stage.IntervalId) return;
+      // (stages.tsx가 먼저 가져간다). MIDI도 같은 조건으로 꺼진다.
+      if (!usesMidiInput(config.stage)) return;
       const note = KEY_FALLBACK[event.key.toLowerCase()];
       if (note !== undefined) {
         event.preventDefault();
@@ -184,6 +210,15 @@ export function QuizPage({
 
   return (
     <Stack>
+      {midiStage && (
+        <DeviceStatus
+          label="MIDI"
+          state={DEVICE_STATE[midi.status]}
+          detail={midi.message}
+          actionLabel={midi.status === "unsupported" ? undefined : "다시 찾기"}
+          onAction={midi.refresh}
+        />
+      )}
       <SessionHeader progress={view.progressText} score={view.score} />
       <TimerBar
         ratio={ratio}

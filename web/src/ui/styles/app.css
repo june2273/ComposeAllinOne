@@ -145,6 +145,63 @@ button {
   background: var(--color-surface-raised);
 }
 
+/* --- 장치 상태 (MIDI 등) --- */
+
+.device {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-raised);
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+.device__dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--color-text-muted);
+}
+.device--ok .device__dot {
+  background: var(--color-correct);
+}
+.device--warn .device__dot {
+  background: var(--color-timeout);
+}
+.device--off .device__dot {
+  background: var(--color-border-strong);
+}
+.device__label {
+  flex: none;
+  font-weight: 600;
+  color: var(--color-text);
+}
+.device__detail {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.device__action {
+  flex: none;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  padding: var(--space-1) var(--space-3);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--text-xs);
+  cursor: pointer;
+  transition: background var(--transition);
+}
+.device__action:hover {
+  background: var(--color-surface-sunken);
+}
+
 /* --- 문항형 화면 --- */
 
 .quiz__head {
@@ -320,4 +377,112 @@ button {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
+}
+
+/* --- 파일 입력 --- */
+
+.picker {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: var(--space-7) var(--space-4);
+  border: 2px dashed var(--color-border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-raised);
+  cursor: pointer;
+  text-align: center;
+  transition: border-color var(--transition), background var(--transition);
+}
+.picker:hover,
+.picker--over {
+  border-color: var(--color-accent);
+  background: var(--color-surface-sunken);
+}
+.picker--off {
+  cursor: default;
+  opacity: 0.5;
+}
+.picker__input {
+  display: none;
+}
+.picker__label {
+  font-size: var(--text-lg);
+  font-weight: 600;
+}
+.picker__hint {
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+
+/* --- 진행률 --- */
+
+.progress {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.progress__head {
+  display: flex;
+  justify-content: space-between;
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+.progress__track {
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-sunken);
+  overflow: hidden;
+}
+.progress__fill {
+  height: 100%;
+  background: var(--color-accent);
+  transition: width var(--transition);
+}
+
+/* --- 측정값 --- */
+
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--space-3);
+}
+.metric {
+  padding: var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-raised);
+}
+/* 신뢰도를 테두리로 드러낸다. 낮으면 점선 — 확정처럼 보이면 안 된다. */
+.metric--high {
+  border-color: var(--color-border-strong);
+  background: var(--color-surface-sunken);
+}
+.metric--low {
+  border-style: dashed;
+}
+.metric__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+.metric__label {
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+.metric__note {
+  font-size: var(--text-xs);
+  color: var(--color-timeout);
+}
+.metric__value {
+  font-size: var(--text-xl);
+  font-weight: 600;
+  margin-top: var(--space-1);
+}
+.metric__detail {
+  margin-top: var(--space-1);
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
 }

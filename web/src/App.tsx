@@ -6,12 +6,14 @@
  * 구조가 막는다.
  */
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 
 import { type Activity, Domain, Kind, Status } from "./core/catalog";
-import { makeDefaultBackend } from "./core/audio";
+import type { AudioBackend } from "./core/audio";
+import { makeAudioBackend } from "./platform/piano";
 import type { Result } from "./core/session";
 import { NavBar } from "./ui/components";
+import { AnalysisPage } from "./ui/analysis";
 import {
   CatalogPage,
   HomePage,
@@ -27,8 +29,49 @@ type Screen =
   | { name: "activity"; activity: Activity }
   | { name: "result"; activity: Activity; results: Result[] };
 
+/**
+ * 활동 하나를 어느 화면에 태울지 고른다.
+ *
+ * **종류(Kind)가 화면을 고르는 자리는 여기 하나다.** 연주형은 아직 화면이
+ * 없으므로 준비 중으로 간다 — 문항형 화면에 태우면 문제 큐·제한시간·정답
+ * 판정이 전부 어긋난다.
+ */
+function ActivityScreen({
+  activity,
+  run,
+  audio,
+  onFinished,
+}: {
+  activity: Activity;
+  run: number;
+  audio: AudioBackend;
+  onFinished: (results: Result[]) => void;
+}) {
+  if (activity.status === Status.Planned) return <PlannedPage activity={activity} />;
+  if (activity.kind === Kind.Tool) return <AnalysisPage />;
+  if (activity.kind === Kind.Quiz && activity.config) {
+    return (
+      <QuizPage
+        key={`${activity.id}#${run}`}
+        config={activity.config}
+        audio={audio}
+        onFinished={onFinished}
+      />
+    );
+  }
+  return <PlannedPage activity={activity} />;
+}
+
 export default function App() {
-  const audio = useMemo(makeDefaultBackend, []);
+  // 피아노 샘플을 배경에서 받는다. 준비 전에는 사인 신스로 난다.
+  //
+  // **useMemo를 쓰면 안 된다**(실측). StrictMode가 팩토리를 두 번 부르는데,
+  // 오디오 백엔드는 AudioContext와 1.3MiB 샘플을 들고 있어서 버려지는 쪽도
+  // 자원을 그대로 잡는다 — 샘플을 두 번 내려받는 것을 네트워크 로그로 확인했다.
+  // ref는 두 번째 호출 자체가 일어나지 않는다.
+  const audioRef = useRef<AudioBackend | null>(null);
+  audioRef.current ??= makeAudioBackend();
+  const audio = audioRef.current;
   const [screen, setScreen] = useState<Screen>({ name: "home" });
   // "한 번 더"가 세션을 새로 만들도록 강제하는 키
   const [run, setRun] = useState(0);
@@ -78,19 +121,12 @@ export default function App() {
         <CatalogPage domain={screen.domain} onPick={openActivity} />
       )}
 
-      {screen.name === "activity" &&
-        (screen.activity.status === Status.Planned ||
-        screen.activity.kind !== Kind.Quiz ||
-        !screen.activity.config ? (
-          <PlannedPage activity={screen.activity} />
-        ) : (
-          <QuizPage
-            key={`${screen.activity.id}#${run}`}
-            config={screen.activity.config}
-            audio={audio}
-            onFinished={onFinished}
-          />
-        ))}
+      {screen.name === "activity" && <ActivityScreen
+        activity={screen.activity}
+        run={run}
+        audio={audio}
+        onFinished={onFinished}
+      />}
 
       {screen.name === "result" && (
         <ResultPage

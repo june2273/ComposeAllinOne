@@ -218,3 +218,15 @@ export function IntervalStage({ question, locked, onAnswer }: StageProps) {
 export function stageFor(stage: Stage) {
   return stage === Stage.IntervalId ? IntervalStage : MidiStage;
 }
+
+/**
+ * 이 스테이지가 건반으로 답하는가.
+ *
+ * MIDI 입력과 자판 폴백이 **같은 조건**을 봐야 한다. 음정 스테이지는 숫자·성질
+ * 키를 쓰므로 자판 폴백이 꺼져 있는데, 거기서 MIDI만 살아 있으면 건반을 누르는
+ * 순간 엉뚱한 응답이 `Session.collect()`로 들어간다 — 채점기가 기대하는 것은
+ * `IntervalResponse`인데 MIDI 번호 배열이 오게 된다. 조건을 한 곳에 둔다.
+ */
+export function usesMidiInput(stage: Stage): boolean {
+  return stage !== Stage.IntervalId;
+}

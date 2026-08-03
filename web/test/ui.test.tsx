@@ -138,11 +138,21 @@ describe("네비게이션", () => {
     expect(screen.getByText(/requiredPcs \/ optionalPcs/)).toBeTruthy();
   });
 
-  test("연주형·도구형은 문항형 화면으로 가지 않는다", () => {
+  test("도구형은 문항형 화면으로 가지 않는다", () => {
     render(<App />);
     act(() => screen.getByText("음악분석도구").click());
     act(() => screen.getByText("분석 콘솔").click());
-    expect(screen.getByText(/연습 세션이 아니다/)).toBeTruthy();
+    // 파일을 받는 화면이지 문제 화면이 아니다
+    expect(screen.getByText("오디오 파일 열기")).toBeTruthy();
+    expect(screen.queryByText("다시 듣기 (Space)")).toBeNull();
+    expect(screen.queryByText(/문제 1 \/ 10/)).toBeNull();
+  });
+
+  test("연주형은 화면이 생길 때까지 준비 중으로 간다", () => {
+    render(<App />);
+    act(() => screen.getByText("화성학").click());
+    act(() => screen.getByText("코드 학습").click());
+    expect(screen.getByText(/Session을 쓰지 않는다/)).toBeTruthy();
     expect(screen.queryByText("다시 듣기 (Space)")).toBeNull();
   });
 });

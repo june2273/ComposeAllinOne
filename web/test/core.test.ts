@@ -136,9 +136,9 @@ check("락아웃 중 500회 전부 거부", rejected === 500, rejected);
 
 console.log("\n=== 8. 카탈로그 ===");
 check("15개", C.CATALOG.length === 15, C.CATALOG.length);
-check("동작 2개", C.readyActivities().length === 2);
+check("동작 3개", C.readyActivities().length === 3);
 check("id 중복 없음", new Set(C.CATALOG.map(a => a.id)).size === 15);
-check("ready면 config", C.readyActivities().every(a => a.config !== undefined));
+check("ready인 문항형이면 config", C.readyActivities().filter(a => a.kind === C.Kind.Quiz).every(a => a.config !== undefined));
 check("planned면 설명", C.CATALOG.filter(a => !C.isReady(a)).every(a => (a.features?.length ?? 0) + (a.requires?.length ?? 0) > 0));
 check("연주형/도구형 분리", C.BY_ID["harmony.chord_play"].kind === C.Kind.Performance && C.BY_ID["analysis.console"].kind === C.Kind.Tool);
 for (const d of Object.values(C.Domain)) { const [a,b] = C.counts(d); console.log(`     ${d}: ${a} / ${b}`); }

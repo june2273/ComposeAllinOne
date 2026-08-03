@@ -6,7 +6,7 @@ Upright Piano KW (Kawai 업라이트, FreePats) — Creative Commons CC0 퍼블�
 용량이 31MiB쯤 되므로 저장소에 커밋하지 않고(.gitignore) 이 스크립트로
 받는다.
 
-    .venv/bin/python download_assets.py
+    .venv/bin/python web/scripts/download_assets.py
 """
 
 from __future__ import annotations
@@ -21,7 +21,8 @@ REPO = "freepats/upright-piano-KW"
 REF = "main"
 TARBALL = f"https://codeload.github.com/{REPO}/tar.gz/{REF}"
 
-DEST = Path(__file__).parent / "assets" / "UprightPianoKW"
+ROOT = Path(__file__).resolve().parents[2]
+DEST = ROOT / "assets" / "UprightPianoKW"
 WANTED_SUFFIXES = (".sfz", ".flac")
 WANTED_NAMES = ("LICENSE", "README.md")
 

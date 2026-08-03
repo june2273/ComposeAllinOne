@@ -1,12 +1,15 @@
-# 웹 프론트엔드 (React + Vite)
+# 화성학·청음 연습 앱 (React + Vite)
 
-Python/PySide6 앱을 웹으로 옮긴 것. **기존 Python 앱은 저장소 루트에 그대로
-있고 계속 동작한다.** 파이가 맞을 때까지 둘을 나란히 둔다.
+원래 PySide6 데스크톱 앱이었고 2026-08-03에 웹만 남겼다. Python판 코드가
+필요하면 커밋 `10abd90`에 있다.
+
+`scripts/`의 Python 셋은 **빌드 타임에 피아노 자산을 굽는 도구**다 — 앱이
+실행 중에 Python을 부르는 곳은 없다.
 
 ```bash
 npm install
 npm run dev      # http://localhost:5173
-npm test         # 이식 검증 + UI 결선 (78개 검사)
+npm test         # 이론·세션·UI·MIDI·오디오·피아노·분석 (7파일 105개)
 npm run build
 ```
 
@@ -14,7 +17,7 @@ npm run build
 
 ```
 src/
-  core/        React를 모르는 순수 로직. Python판을 1:1로 옮겼다.
+  core/        React도 브라우저 API도 모르는 순수 로직
     theory.ts      음이름·음고류·Pitch·Interval
     config.ts      난이도 8축 + 프리셋
     catalog.ts     활동 목록 (무엇을 연습·분석할 수 있는가)
@@ -23,18 +26,85 @@ src/
     session.ts     세션 상태 기계
     score.ts       verovio 악보
     audio.ts       Web Audio 백엔드
+    analysis/      오디오 분석 — 의존성 없는 DSP
+      fft.ts         FFT + STFT 프레임 (직접 구현)
+      features.ts    SuperFlux ODF · 크로마 · 조율 추정
+      tempo.ts       자기상관 템포 + DP 비트 추적
+      meter.ts       박자표 (축A 세분화 × 축B 마디당 박)
+      key.ts         Krumhansl–Schmuckler 조성
+  platform/    브라우저가 어떻게 하는가. 음악적 판단 없음.
+    midi.ts        Web MIDI — 포트 선택·메시지 해석
+    piano.ts       샘플 피아노 (없으면 사인으로 폴백)
+    analyze.ts     오디오 디코딩 + 분석 워커
+    analysis.worker.ts
+  ds/          디자인 시스템 — 도메인을 모르는 표시 부품
   ui/
     useSession.ts  타이머·입력을 Session에 잇는 훅 (문항형 전용)
+    useMidi.ts     MIDI를 React 수명주기에 붙이는 훅
     pages.tsx      홈 / 목록 / 문항형 / 준비 중 / 결과
     stages.tsx     스테이지별 문제 표시 + 답 입력
+    analysis.tsx   분석 콘솔 (도구형)
     components.tsx NavBar · Card · Staff
     styles/
       tokens.css   ← 브랜딩이 바뀔 때 손대는 유일한 파일
       app.css      컴포넌트 스타일 (값은 전부 토큰을 거친다)
+scripts/       빌드 타임 자산 도구 (Python)
+  download_assets.py   원본 음원 내려받기
+  sfz.py               SFZ 파서
+  prepare_web_piano.py 웹용 AAC + 매니페스트로 굽기
 ```
 
-의존성은 한 방향으로만 흐른다: `ui/` → `core/` → (없음). `core/`는 React를
-import하지 않는다 — 그래서 브라우저 없이 테스트가 돈다.
+의존성은 한 방향으로만 흐른다: `ui/` → `platform/` → `core/` → (없음).
+`core/`는 React도 브라우저 API도 import하지 않고, `platform/`은 음악적 판단을
+하지 않는다 — 그래서 브라우저 없이 테스트가 돈다.
+
+## 피아노 음원
+
+저장소에 없다. 두 스크립트를 순서대로 돌리면 `public/piano/`에 생긴다.
+
+```bash
+.venv/bin/python web/scripts/download_assets.py      # 원본 31MiB
+.venv/bin/python web/scripts/prepare_web_piano.py    # 웹용 1.3MiB로 굽는다 (ffmpeg 필요)
+```
+
+**안 돌려도 앱은 뜬다** — 음원이 없으면 사인 신스로 난다. 굽고 나면 다음
+재생부터 피아노로 바뀐다.
+
+### 조율
+
+원본은 실제 어쿠스틱 업라이트라 **Railsback 곡선**을 따른다(저음 낮게, 고음
+높게 — 조율 불량이 아니라 정상이다). 이 앱은 음정을 가르치므로 **평균율로
+당긴다** — 두 음이 서로 다른 만큼 어긋나 있으면 그 음정이 맥놀이로 들린다.
+
+**오디오는 다시 굽지 않는다.** `manifest.json`의 `tune`(센트)을 재생할 때
+`playbackRate`로 되밀 뿐이라 음질 손실이 없고, **`public/piano/*.m4a`는 언제나
+녹음 그대로**다. 보정을 끄려면 `prepare_web_piano.py`의 `tuning_table()`이 빈
+표를 주게 하면 된다.
+
+## MIDI 입력
+
+**Chrome·Edge에서 건반이 바로 된다.** Safari·Firefox에는 Web MIDI가 없어서
+자판 폴백으로 떨어지고, 그 사실을 화면 위 한 줄로 알려준다.
+
+컨트롤러 하나가 포트를 여럿 내보내는 경우가 많은데, KeyLab의 `MCU/HUI` 포트는
+트랜스포트 버튼을 노트 메시지로 보내 **오답을 유발한다.** `platform/midi.ts`의
+`PORT_AVOID`가 이런 포트를 거른다.
+
+MIDI와 자판 폴백은 `stages.usesMidiInput()` **하나로 함께** 켜지고 꺼진다.
+음정 스테이지는 숫자·성질 키를 쓰므로 둘 다 꺼진다. 조건을 두 곳에 두면 건반
+입력이 음정 채점기로 흘러들어간다.
+
+## 분석 콘솔
+
+오디오 파일을 열면 **BPM · 박자 · 조성**이 나온다. 전부 브라우저 안에서 돌고
+파일은 어디로도 올라가지 않는다. **라이브러리를 쓰지 않는다 — FFT까지 직접
+짰다**(`core/analysis/`). DSP는 워커에서 돌려 화면을 막지 않는다.
+
+없는 것: 스템 분리·코드 인식·멜로디(학습된 모델이 필요하다), 그리고
+변박·전조·변속(구간을 나누려면 구조 분석이 먼저다). 곡 전체를 한 덩어리로 본다.
+
+알고리즘 출처는 [../citation.md](../citation.md) 3-1절 — 논문을 읽고 새로
+구현했지 코드를 옮기지 않았다.
 
 ## 디자인 시스템 (`src/ds/`)
 
@@ -46,7 +116,7 @@ import하지 않는다 — 그래서 브라우저 없이 테스트가 돈다.
 npm run build:ds   # dist-ds/{index.js, index.d.ts, index.css}
 ```
 
-부품 17개: `Button` `Badge` `Card` `NavBar` `PageHeading` `Stack`
+부품 18개: `Button` `Badge` `Card` `NavBar` `PageHeading` `Stack` `DeviceStatus`
 `SessionHeader` `TimerBar` `Verdict` `NumberField` `ChoiceRow` `Hint`
 `StaffFigure` `ScoreRow` `ScoreSummary` `SpecSection` `PlannedNotice`
 
@@ -91,20 +161,19 @@ npm run build:ds   # dist-ds/{index.js, index.d.ts, index.css}
 
 ## 아직 없는 것
 
-- **MIDI 입력** — Tauri를 붙일 때 네이티브로 읽는다. 지금은 컴퓨터 자판
-  `A W S E D F T G Y H U J K` = C4~C5 폴백만 있다.
-- **샘플 피아노** — Upright Piano KW(CC0)가 31MiB라 웹 로딩 전략을 먼저
-  정해야 한다. 지금은 사인파 가산합성.
-- 카탈로그 15개 중 13개 — `catalog.ts`의 `requires`에 각각 무엇이 필요한지
+- **Safari·Firefox의 MIDI** — Web MIDI가 없다. Tauri를 붙일 때 네이티브로
+  읽는다. 그 브라우저에서는 자판 `A W S E D F T G Y H U J K` = C4~C5 폴백.
+- 카탈로그 15개 중 12개 — `catalog.ts`의 `requires`에 각각 무엇이 필요한지
   적혀 있고, 앱에서 그 활동을 열면 그대로 화면에 나온다.
 
-## Python판과의 차이
+## Python판에서 옮겨오며 사라진 것
 
 계산 규칙은 한 줄도 바꾸지 않았다(같은 테스트 케이스로 검증). 사라진 것은
-Qt 때문에 필요했던 우회들이다.
+Qt 때문에 필요했던 우회들이다. 새로 짤 때 되살리지 말 것.
 
 | Python/Qt에서 필요했던 것 | 웹에서 |
 |---|---|
+| MIDI 콜백 → Qt 시그널 (스레드 경계) | `midimessage`가 메인 스레드로 온다 |
 | verovio 중첩 `<svg>` 평탄화 | 브라우저가 그냥 처리 |
 | 오선에 `stroke` 주입 | `<style>`이 그대로 먹는다 |
 | 종횡비 유지용 커스텀 위젯 | `viewBox` + CSS 두 줄 |

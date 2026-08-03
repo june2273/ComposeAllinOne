@@ -18,7 +18,7 @@
  * 도메인과 이어 붙이는 일은 `src/ui/`가 한다.
  */
 
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
 import "../ui/styles/app.css";
 
@@ -121,6 +121,45 @@ export function PageHeading({ title, subtitle, center }: PageHeadingProps) {
 
 export function Stack({ children }: { children: ReactNode }) {
   return <div className="stack">{children}</div>;
+}
+
+export type DeviceState = "ok" | "warn" | "off";
+
+export interface DeviceStatusProps {
+  /** 장치 이름. "MIDI" 같은 짧은 말 */
+  label: string;
+  state: DeviceState;
+  /** 상세 한 줄. 포트 이름이나 안내 문구 */
+  detail?: string;
+  /** 오른쪽 버튼. 없으면 감춘다 */
+  actionLabel?: string;
+  onAction?: () => void;
+}
+
+/**
+ * 외부 장치가 붙어 있는지 알려주는 한 줄.
+ *
+ * 어떤 장치인지는 모른다 — MIDI든 오디오 인터페이스든 같은 부품을 쓴다.
+ */
+export function DeviceStatus({
+  label,
+  state,
+  detail,
+  actionLabel,
+  onAction,
+}: DeviceStatusProps) {
+  return (
+    <div className={`device device--${state}`}>
+      <span className="device__dot" aria-hidden="true" />
+      <span className="device__label">{label}</span>
+      <span className="device__detail">{detail}</span>
+      {actionLabel && (
+        <button type="button" className="device__action" onClick={onAction}>
+          {actionLabel}
+        </button>
+      )}
+    </div>
+  );
 }
 
 // --- 문제 풀이 화면 -----------------------------------------------------------
@@ -303,6 +342,125 @@ export function ScoreSummary({ score, total, rows, actions }: ScoreSummaryProps)
       {actions && <div className="result__actions">{actions}</div>}
     </div>
   );
+}
+
+// --- 파일 입력 / 진행률 / 측정값 -------------------------------------------------
+
+export interface FilePickerProps {
+  /** 가운데 큰 글씨. "오디오 파일 열기" */
+  label: string;
+  /** 아래 작은 글씨. "WAV · MP3 · M4A" */
+  hint?: string;
+  /** `<input accept>` 그대로. "audio/*" */
+  accept?: string;
+  disabled?: boolean;
+  onFile?: (file: File) => void;
+}
+
+/**
+ * 파일 하나를 받는 자리. 눌러서 고르거나 끌어다 놓는다.
+ *
+ * 끌어오는 중인지(`over`)만 상태로 갖는다 — 무엇을 받았는지는 부르는 쪽의
+ * 몫이다.
+ */
+export function FilePicker({
+  label,
+  hint,
+  accept,
+  disabled,
+  onFile,
+}: FilePickerProps) {
+  const [over, setOver] = useState(false);
+  const take = (files: FileList | null) => {
+    const file = files?.[0];
+    if (file && !disabled) onFile?.(file);
+  };
+  return (
+    <label
+      className={`picker${over ? " picker--over" : ""}${disabled ? " picker--off" : ""}`}
+      onDragOver={(event) => {
+        event.preventDefault();
+        setOver(true);
+      }}
+      onDragLeave={() => setOver(false)}
+      onDrop={(event) => {
+        event.preventDefault();
+        setOver(false);
+        take(event.dataTransfer.files);
+      }}
+    >
+      <input
+        type="file"
+        className="picker__input"
+        accept={accept}
+        disabled={disabled}
+        onChange={(event) => {
+          take(event.target.files);
+          event.target.value = "";
+        }}
+      />
+      <span className="picker__label">{label}</span>
+      {hint && <span className="picker__hint">{hint}</span>}
+    </label>
+  );
+}
+
+export interface ProgressBarProps {
+  /** 0~1 */
+  ratio: number;
+  /** 막대 위 왼쪽 문구. "스펙트럼 분석" */
+  label?: string;
+}
+
+export function ProgressBar({ ratio, label }: ProgressBarProps) {
+  const clamped = Math.max(0, Math.min(1, ratio));
+  return (
+    <div className="progress">
+      <div className="progress__head">
+        <span>{label ?? ""}</span>
+        <span>{Math.round(clamped * 100)}%</span>
+      </div>
+      <div className="progress__track">
+        <div className="progress__fill" style={{ width: `${clamped * 100}%` }} />
+      </div>
+    </div>
+  );
+}
+
+export type ConfidenceLevel = "high" | "medium" | "low";
+
+export interface MetricProps {
+  /** "BPM" · "박자" · "조성" */
+  label: string;
+  /** 크게 보일 값. "128.4" */
+  value: string;
+  /** 값 아래 한 줄. 근거나 후보 */
+  detail?: string;
+  /**
+   * 확신 정도. `low`는 점선 테두리로 "확인 필요"를 드러낸다 — 원리적으로
+   * 모호한 값을 확정처럼 보여주지 않기 위한 장치다.
+   */
+  confidence?: ConfidenceLevel;
+  /** 오른쪽 위 짧은 꼬리표. "확인 필요" */
+  note?: string;
+}
+
+export function Metric({ label, value, detail, confidence, note }: MetricProps) {
+  return (
+    <div className={`metric${confidence ? ` metric--${confidence}` : ""}`}>
+      <div className="metric__head">
+        <span className="metric__label">{label}</span>
+        {note && <span className="metric__note">{note}</span>}
+      </div>
+      <div className="metric__value">{value}</div>
+      {detail && <div className="metric__detail">{detail}</div>}
+    </div>
+  );
+}
+
+/** 측정값 여러 개를 나란히. 좁은 화면에서는 한 줄에 하나가 된다. */
+export function MetricGrid({ children }: { children: ReactNode }) {
+  return <div className="metric-grid">{children}</div>;
 }
 
 // --- 준비 중 화면 -------------------------------------------------------------
