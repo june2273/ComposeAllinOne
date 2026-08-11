@@ -341,6 +341,7 @@ FFT까지 직접 짰다. 따라서 여기에 걸리는 라이선스는 없지만
 | 알고리즘 | 출처 | 우리 코드 |
 |---|---|---|
 | SuperFlux 온셋 검출 (로그주파수 필터뱅크 + 주파수축 max-filter + 지연 차분) | Böck & Widmer, "Maximum Filter Vibrato Suppression for Onset Detection", DAFx 2013 | `analysis/features.ts` |
+| 온셋 봉우리 고르기 (국소 최대 + 문턱 + 불응기) | Böck, Krebs & Schedl, "Evaluating the Online Capabilities of Onset Detection Methods", ISMIR 2012 (§2.3의 peak-picking) | `transcribe/notes.ts` `pickOnsets` |
 | 자기상관 × 로그정규 템포 prior | Klapuri et al. 계열. 강의 08(음악 정보학, GCT731)이 정리한 형태를 따랐다 | `analysis/tempo.ts` `estimateTempo` |
 | 동적 계획법 비트 추적 (`D(t)=onset(t)+max{D(τ)−λ·log²(Δ/T)}`) | Ellis, "Beat Tracking by Dynamic Programming", J. New Music Research 36(1), 2007 | `analysis/tempo.ts` `trackBeats` |
 | Krumhansl–Schmuckler 조성 판정 (크로마 × 프로파일 상관) | Krumhansl, *Cognitive Foundations of Musical Pitch*, 1990 (프로파일은 Krumhansl & Kessler 1982) | `analysis/key.ts` |

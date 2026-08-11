@@ -14,10 +14,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AnalysisReport } from "../core/analysis";
 import { ScoreRenderer } from "../core/score";
 import {
+  type OnsetCurve,
   type Transcription,
   toMidiFiles,
   transcribe,
 } from "../core/transcribe";
+import { extractOnset } from "../platform/analyze";
 import {
   AudioRow,
   Button,
@@ -60,6 +62,31 @@ export interface TranscriptionPanelProps {
   /** 테스트가 감지를 건너뛰는 자리 */
   probe?: typeof detect;
   run?: typeof analyzeWithSidecar;
+  /** 테스트가 온셋 추출을 건너뛰는 자리 */
+  onset?: (audio: Blob, signal?: AbortSignal) => Promise<OnsetCurve>;
+}
+
+/**
+ * 후처리 보컬의 온셋 곡선. **실패하면 `undefined`다** — 온셋이 없으면 같은 음
+ * 재발음을 못 가를 뿐이고, 그것 때문에 전사 전체를 버릴 이유가 없다. 음원이
+ * 없으면 사인 신스로 나는 것과 같은 방침이다.
+ *
+ * 원본 믹스가 아니라 **분리·게이트를 지난 보컬**을 쓴다. 믹스의 ODF는 드럼이
+ * 지배해서 유령 음표가 쏟아진다(실측: 곡A에서 유령 78 → 137).
+ */
+async function onsetOf(
+  result: SidecarResult,
+  env: SidecarEnv | undefined,
+  extract: (audio: Blob, signal?: AbortSignal) => Promise<OnsetCurve>,
+  signal: AbortSignal,
+): Promise<OnsetCurve | undefined> {
+  try {
+    const response = await fetch(audioUrl(result.jobId, "vocal_processed", env), { signal });
+    if (!response.ok) return undefined;
+    return await extract(await response.blob(), signal);
+  } catch {
+    return undefined;
+  }
 }
 
 export function TranscriptionPanel({
@@ -68,6 +95,7 @@ export function TranscriptionPanel({
   env,
   probe = detect,
   run = analyzeWithSidecar,
+  onset = (audio, signal) => extractOnset(audio, {}, signal),
 }: TranscriptionPanelProps) {
   // null = 아직 확인 중, false = 없음
   const [health, setHealth] = useState<SidecarHealth | null | false>(null);
@@ -102,20 +130,27 @@ export function TranscriptionPanel({
     setState({ name: "running", progress: { stage: "시작", ratio: 0 } });
 
     run(file, (progress) => setState({ name: "running", progress }), env, controller.signal)
-      .then((result) => {
+      .then(async (result) => {
+        if (controller.signal.aborted) return;
+        setState({ name: "running", progress: { stage: "온셋 찾는 중", ratio: 0.97 } });
+        const curve = await onsetOf(result, env, onset, controller.signal);
         if (controller.signal.aborted) return;
         setState({
           name: "done",
           result,
-          transcription: transcribe(result.curve, {
-            bpm: report.tempo.bpm,
-            beats: report.beats,
-            downbeats: report.downbeats,
-            beatsPerBar: report.meter.beatsPerBar,
-            tuningCents: report.tuningCents,
-            key: { tonic: report.key.tonic, mode: report.key.mode },
-            title: file.name,
-          }),
+          transcription: transcribe(
+            result.curve,
+            {
+              bpm: report.tempo.bpm,
+              beats: report.beats,
+              downbeats: report.downbeats,
+              beatsPerBar: report.meter.beatsPerBar,
+              tuningCents: report.tuningCents,
+              key: { tonic: report.key.tonic, mode: report.key.mode },
+              title: file.name,
+            },
+            { onset: curve },
+          ),
         });
       })
       .catch((failure: unknown) => {

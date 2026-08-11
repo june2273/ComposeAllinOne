@@ -23,14 +23,34 @@ import { basename, join } from "node:path";
 
 import { expect, test } from "vitest";
 
-import { ANALYSIS_RATE, analyzeAudio, type AnalysisReport } from "../../src/core/analysis";
-import { toMidiFiles, transcribe, type PitchCurve } from "../../src/core/transcribe";
+import {
+  ANALYSIS_RATE,
+  analyzeAudio,
+  extractOnsetCurve,
+  type AnalysisReport,
+} from "../../src/core/analysis";
+import {
+  type OnsetCurve,
+  toMidiFiles,
+  transcribe,
+  type PitchCurve,
+} from "../../src/core/transcribe";
 import { resample } from "../../src/platform/analyze";
 import { decodeWav } from "./wav";
 
 const CACHE = process.env.EVAL_CACHE ?? "../server/cache";
 const F0_DIR = process.env.EVAL_F0 ?? "/tmp/f0";
 const OUT_DIR = process.env.EVAL_OUT ?? "/tmp/eval";
+/**
+ * 온셋을 뽑을 스템 파일(슬롯 안의 상대 경로). 비우면 온셋 없이 예전처럼 돈다.
+ * 예: `vocal_processed.wav` · `stems/vocals.wav`
+ */
+const ONSET_FROM = process.env.EVAL_ONSET ?? "";
+/** 훑을 문턱들. 온셋 곡선은 한 번만 뽑으므로 값을 늘려도 거의 공짜다 */
+const STRENGTHS = (process.env.EVAL_ONSET_STRENGTH ?? "2.0")
+  .split(",")
+  .map((s) => Number(s.trim()))
+  .filter((s) => Number.isFinite(s));
 
 /** `<슬롯>-<입력>-<엔진>[-t문턱].json` — `extract_f0.py`가 짓는 이름 */
 function slotOf(file: string): string {
@@ -53,13 +73,24 @@ function mono(samples: Float32Array, channels: number): Float32Array {
  * 곡 하나의 브라우저측 분석. **슬롯마다 한 번만 한다** — 같은 곡의 커브가
  * 12벌이라도 비트 그리드는 하나다(그리고 이게 이 스크립트에서 제일 느리다).
  */
-function analyzeSlot(slot: string): AnalysisReport {
-  const bytes = readFileSync(join(CACHE, slot, "input.wav"));
+/** 슬롯 안의 WAV 하나를 `ANALYSIS_RATE` 모노로 */
+function loadMono(slot: string, name: string): Float32Array {
+  const bytes = readFileSync(join(CACHE, slot, name));
   const wav = decodeWav(
     bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
   );
-  const samples = resample(mono(wav.samples, wav.channels), wav.sampleRate, ANALYSIS_RATE);
-  return analyzeAudio(samples, ANALYSIS_RATE);
+  return resample(mono(wav.samples, wav.channels), wav.sampleRate, ANALYSIS_RATE);
+}
+
+function analyzeSlot(slot: string): AnalysisReport {
+  return analyzeAudio(loadMono(slot, "input.wav"), ANALYSIS_RATE);
+}
+
+/**
+ * 보컬 스템의 온셋 곡선. **슬롯마다 한 번만** — 문턱을 몇 개 훑든 곡선은 하나다.
+ */
+function onsetOf(slot: string): OnsetCurve {
+  return extractOnsetCurve(loadMono(slot, ONSET_FROM), ANALYSIS_RATE);
 }
 
 test("캐시된 곡의 f0 커브를 전부 MIDI로 굽는다", { timeout: 30 * 60_000 }, () => {
@@ -70,7 +101,14 @@ test("캐시된 곡의 f0 커브를 전부 MIDI로 굽는다", { timeout: 30 * 6
   mkdirSync(OUT_DIR, { recursive: true });
 
   const reports = new Map<string, AnalysisReport>();
+  const onsets = new Map<string, OnsetCurve>();
   const rows: string[] = [];
+
+  // 온셋을 안 주는 기준선은 늘 굽는다 — 비교 대상이 없으면 숫자를 읽을 수 없다
+  const variants: { suffix: string; onset?: number }[] = [{ suffix: "" }];
+  if (ONSET_FROM) {
+    for (const s of STRENGTHS) variants.push({ suffix: `-on${s}`, onset: s });
+  }
 
   for (const file of files) {
     const slot = slotOf(file);
@@ -84,31 +122,42 @@ test("캐시된 곡의 f0 커브를 전부 MIDI로 굽는다", { timeout: 30 * 6
           `비트 ${report.beats.length}개`,
       );
     }
+    if (ONSET_FROM && !onsets.has(slot)) onsets.set(slot, onsetOf(slot));
 
     const curve = JSON.parse(readFileSync(join(F0_DIR, file), "utf-8")) as PitchCurve;
-    const name = basename(file, ".json");
-    const result = transcribe(curve, {
-      bpm: report.tempo.bpm,
-      beats: report.beats,
-      downbeats: report.downbeats,
-      beatsPerBar: report.meter.beatsPerBar,
-      tuningCents: report.tuningCents,
-      key: { tonic: report.key.tonic, mode: report.key.mode },
-      title: name,
-    });
-    const midi = toMidiFiles(result, {
-      bpm: report.tempo.bpm,
-      beatsPerBar: report.meter.beatsPerBar,
-    });
-    writeFileSync(join(OUT_DIR, `${name}-performed.mid`), midi.performed);
-    writeFileSync(join(OUT_DIR, `${name}-quantized.mid`), midi.quantized);
+    const base = basename(file, ".json");
 
-    rows.push(
-      `${name}: 음표 ${result.notes.length} · 격자 ${result.quantized.length} · ` +
-        `드리프트 ${result.offsetMs.toFixed(0)}ms · 조율보정 ${result.tuningCents.toFixed(1)}센트`,
-    );
-    // 진행 상황을 바로 보여 준다 — 곡당 수십 초라 끝까지 침묵하면 멈춘 줄 안다
-    console.log(rows[rows.length - 1]);
+    for (const variant of variants) {
+      const name = base + variant.suffix;
+      const result = transcribe(
+        curve,
+        {
+          bpm: report.tempo.bpm,
+          beats: report.beats,
+          downbeats: report.downbeats,
+          beatsPerBar: report.meter.beatsPerBar,
+          tuningCents: report.tuningCents,
+          key: { tonic: report.key.tonic, mode: report.key.mode },
+          title: name,
+        },
+        variant.onset === undefined
+          ? {}
+          : { onset: onsets.get(slot), onsetStrength: variant.onset },
+      );
+      const midi = toMidiFiles(result, {
+        bpm: report.tempo.bpm,
+        beatsPerBar: report.meter.beatsPerBar,
+      });
+      writeFileSync(join(OUT_DIR, `${name}-performed.mid`), midi.performed);
+      writeFileSync(join(OUT_DIR, `${name}-quantized.mid`), midi.quantized);
+
+      rows.push(
+        `${name}: 음표 ${result.notes.length} · 격자 ${result.quantized.length} · ` +
+          `드리프트 ${result.offsetMs.toFixed(0)}ms · 조율보정 ${result.tuningCents.toFixed(1)}센트`,
+      );
+      // 진행 상황을 바로 보여 준다 — 곡당 수십 초라 끝까지 침묵하면 멈춘 줄 안다
+      console.log(rows[rows.length - 1]);
+    }
   }
 
   writeFileSync(join(OUT_DIR, "summary.txt"), rows.join("\n") + "\n");

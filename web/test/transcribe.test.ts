@@ -24,6 +24,7 @@ import {
   notatePiece,
   type NoteEvent,
   offsetAtMs,
+  type OnsetCurve,
   type PitchCurve,
   quantizeNotes,
   segmentNotes,
@@ -198,6 +199,108 @@ describe("1. 음표 분할 — f0 커브에서 음을 자른다", () => {
       expect(hzToMidi(midiToHz(midi))).toBeCloseTo(midi, 6);
     }
     expect(hzToMidi(440)).toBe(69);
+  });
+});
+
+// --- 온셋 경계 ----------------------------------------------------------------
+
+/** ODF 홉. 일부러 f0(10ms)와 다르게 둔다 — 시간으로 맞추는지 보려고 */
+const ODF_HOP_MS = 11.6;
+
+/** `초 → 강도` 자리에 봉우리를 세운 온셋 곡선 */
+function onsetAt(seconds: readonly number[], durationSec: number, height = 5): OnsetCurve {
+  const strength = new Float32Array(Math.ceil((durationSec * 1000) / ODF_HOP_MS));
+  for (const at of seconds) {
+    const frame = Math.round((at * 1000) / ODF_HOP_MS);
+    if (frame >= 0 && frame < strength.length) strength[frame] = height;
+  }
+  return { hopMs: ODF_HOP_MS, strength };
+}
+
+describe("1-b. 온셋 경계 — f0가 표현할 수 없는 재발음", () => {
+  /** 같은 음을 1초 내내 유지한 커브. f0만으로는 한 음이다 */
+  const held = curveOf([[1, 69]]);
+
+  test("온셋을 안 주면 예전과 똑같다 — 같은 음은 하나로 뭉친다", () => {
+    expect(segmentNotes(held)).toHaveLength(1);
+  });
+
+  test("온셋이 있으면 같은 음도 갈린다", () => {
+    const notes = segmentNotes(held, { onset: onsetAt([0.5], 1) });
+    expect(notes.map((n) => n.midi)).toEqual([69, 69]);
+    expect(notes[0].endSec).toBeCloseTo(0.5, 1);
+    expect(notes[1].startSec).toBeCloseTo(notes[0].endSec, 6);
+  });
+
+  test("홉이 달라도 시각으로 맞춘다 — 프레임 번호로 맞추면 곡 끝에서 어긋난다", () => {
+    // 11.6ms 격자의 0.9초는 78프레임. 그 번호를 10ms 커브에 그대로 쓰면 0.78초다
+    const notes = segmentNotes(held, { onset: onsetAt([0.9], 1) });
+    expect(notes).toHaveLength(2);
+    expect(notes[0].endSec).toBeCloseTo(0.9, 1);
+  });
+
+  test("문턱 아래 봉우리는 경계가 아니다", () => {
+    const weak = onsetAt([0.5], 1, 0.4);
+    expect(segmentNotes(held, { onset: weak })).toHaveLength(1);
+    expect(segmentNotes(held, { onset: weak, onsetStrength: 0.3 })).toHaveLength(2);
+  });
+
+  test("양쪽이 최소 길이를 넘을 때만 자른다 — 아니면 조각이 사라져 구멍이 난다", () => {
+    // 0.03초 자리에서 자르면 앞 조각이 minNoteMs에 걸려 버려진다.
+    // 그러면 자르지 않은 것보다 나빠진다 — 음표가 30ms 늦게 시작한 것도 아니고
+    // 아예 없어지므로.
+    const notes = segmentNotes(held, { onset: onsetAt([0.03], 1), minNoteMs: 80 });
+    expect(notes).toHaveLength(1);
+    expect(notes[0].startSec).toBeCloseTo(0, 2);
+    expect(notes[0].endSec).toBeCloseTo(1, 2);
+  });
+
+  test("음이 바뀌는 자리의 온셋은 아무것도 바꾸지 않는다 — 이미 경계다", () => {
+    const changing = curveOf([
+      [0.5, 60],
+      [0.5, 64],
+    ]);
+    const plain = segmentNotes(changing);
+    const withOnset = segmentNotes(changing, { onset: onsetAt([0.5], 1) });
+    expect(withOnset).toEqual(plain);
+  });
+
+  test("봉우리 하나가 여러 프레임에 걸쳐도 경계는 하나다", () => {
+    // ODF는 온셋 하나를 여러 프레임에 걸쳐 올린다. 그걸 다 세우면 조각이 쏟아진다
+    const strength = new Float32Array(Math.ceil(1000 / ODF_HOP_MS));
+    for (let i = 40; i <= 46; i += 1) strength[i] = 5 + (i === 43 ? 1 : 0);
+    expect(segmentNotes(held, { onset: { hopMs: ODF_HOP_MS, strength } })).toHaveLength(2);
+  });
+
+  test("불응기 — 촘촘한 봉우리는 하나로 친다", () => {
+    // 40ms 간격으로 셋. 다 세우면 40ms짜리 음표가 생기는데 그건 minNoteMs가
+    // 버려서 오히려 구멍이 된다. 애초에 봉우리 단계에서 거른다.
+    const notes = segmentNotes(held, { onset: onsetAt([0.4, 0.44, 0.48], 1) });
+    expect(notes).toHaveLength(2);
+  });
+
+  test("무성 구간의 온셋은 음표를 만들지 않는다", () => {
+    const gap = curveOf([
+      [0.4, 69],
+      [0.3, null],
+      [0.4, 69],
+    ]);
+    const notes = segmentNotes(gap, { onset: onsetAt([0.55], 1.1) });
+    expect(notes.map((n) => n.midi)).toEqual([69, 69]);
+  });
+
+  test("빈 온셋 곡선은 무시된다", () => {
+    expect(segmentNotes(held, { onset: { hopMs: 0, strength: [] } })).toHaveLength(1);
+    expect(segmentNotes(held, { onset: { hopMs: ODF_HOP_MS, strength: [] } })).toHaveLength(1);
+  });
+
+  test("centsOffset은 조각마다 다시 잰다 — 앞 조각의 값을 물려받지 않는다", () => {
+    // 앞 절반은 +40센트, 뒤 절반은 −40센트로 부른 음
+    const bent = curveOf([[1, 69]], (i) => (i < 50 ? 40 : -40));
+    const notes = segmentNotes(bent, { onset: onsetAt([0.5], 1) });
+    expect(notes).toHaveLength(2);
+    expect(notes[0].centsOffset).toBeCloseTo(40, 0);
+    expect(notes[1].centsOffset).toBeCloseTo(-40, 0);
   });
 });
 

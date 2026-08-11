@@ -374,3 +374,73 @@ describe("3. 화면 — 있을 때와 없을 때", () => {
     expect(screen.getByRole("button", { name: "다시 시도" })).toBeTruthy();
   });
 });
+
+// --- 온셋 ---------------------------------------------------------------------
+
+/** 1.5초 내내 C4. f0만 보면 한 음이다 */
+const HELD: SidecarResult = {
+  jobId: "j1",
+  curve: { hopMs: 10, f0: Array.from({ length: 150 }, () => 261.63) },
+  stems: ["vocals"],
+  hasStems: true,
+  hasMelody: true,
+  durationSec: 1.5,
+};
+
+/** 0.75초 자리에 봉우리 하나 */
+function onsetAtHalf() {
+  const strength = new Float32Array(130);
+  strength[65] = 5;
+  return { hopMs: 11.6, strength };
+}
+
+describe("4. 온셋 — 같은 음 재발음", () => {
+  beforeEach(() => {
+    URL.createObjectURL = vi.fn(() => "blob:fake");
+    URL.revokeObjectURL = vi.fn();
+    // 후처리 보컬을 내려받는 자리. 내용은 안 본다 — 온셋은 주입한다
+    vi.stubGlobal("fetch", () =>
+      Promise.resolve({ ok: true, blob: () => Promise.resolve(new Blob()) } as unknown as Response),
+    );
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  test("온셋이 오면 같은 음도 갈린다", async () => {
+    panel({
+      probe: () => Promise.resolve(HEALTH),
+      run: () => Promise.resolve(HELD),
+      onset: () => Promise.resolve(onsetAtHalf()),
+    });
+    const button = await screen.findByRole("button", { name: /전사 시작/ });
+    act(() => button.click());
+    expect(await screen.findByText(/음표 2개/)).toBeTruthy();
+  });
+
+  /**
+   * 온셋은 **있으면 좋은 것**이지 전제가 아니다. 스템을 못 받아 오거나 디코딩이
+   * 실패해도 전사는 그대로 나와야 한다 — 피아노 음원이 없으면 사인 신스로 나는
+   * 것과 같은 방침이다.
+   */
+  test("온셋을 못 받아도 전사는 나온다", async () => {
+    panel({
+      probe: () => Promise.resolve(HEALTH),
+      run: () => Promise.resolve(HELD),
+      onset: () => Promise.reject(new Error("디코딩 실패")),
+    });
+    const button = await screen.findByRole("button", { name: /전사 시작/ });
+    act(() => button.click());
+    expect(await screen.findByText(/음표 1개/)).toBeTruthy();
+  });
+
+  test("후처리 보컬을 받지 못하면 조용히 넘어간다", async () => {
+    vi.stubGlobal("fetch", () => Promise.resolve({ ok: false } as unknown as Response));
+    panel({
+      probe: () => Promise.resolve(HEALTH),
+      run: () => Promise.resolve(HELD),
+      onset: () => Promise.reject(new Error("불려서는 안 된다")),
+    });
+    const button = await screen.findByRole("button", { name: /전사 시작/ });
+    act(() => button.click());
+    expect(await screen.findByText(/음표 1개/)).toBeTruthy();
+  });
+});

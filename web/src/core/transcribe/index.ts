@@ -43,7 +43,7 @@ import {
 } from "./quantize";
 import { keyFifths, toMusicXml } from "./musicxml";
 
-export type { NoteEvent, NoteOptions, PitchCurve } from "./notes";
+export type { NoteEvent, NoteOptions, OnsetCurve, PitchCurve } from "./notes";
 export {
   hzToMidi,
   midiToHz,

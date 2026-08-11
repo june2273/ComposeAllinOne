@@ -10,9 +10,11 @@
  * 오래 잡지 않는다. 워커가 받는 것은 이미 디코딩된 모노 샘플이다.
  */
 
-import { analyzeAudio } from "../core/analysis";
+import { analyzeAudio, extractOnsetCurve } from "../core/analysis";
 
 interface Request {
+  /** 없으면 `analyze` — 옛 메시지 모양과 호환된다 */
+  job?: "analyze" | "onset";
   samples: Float32Array;
   sampleRate: number;
 }
@@ -23,8 +25,13 @@ const scope = self as unknown as {
 };
 
 scope.onmessage = (event: MessageEvent) => {
-  const { samples, sampleRate } = event.data as Request;
+  const { job, samples, sampleRate } = event.data as Request;
   try {
+    if (job === "onset") {
+      // 보컬 스템의 온셋. 전사의 노트 분할이 쓴다 — 진행률은 없다(수백 ms다)
+      scope.postMessage({ type: "onset", curve: extractOnsetCurve(samples, sampleRate) });
+      return;
+    }
     const report = analyzeAudio(samples, sampleRate, (progress) =>
       scope.postMessage({ type: "progress", ...progress }),
     );

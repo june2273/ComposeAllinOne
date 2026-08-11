@@ -43,7 +43,12 @@ import {
   trackBeats,
 } from "./tempo";
 
-export { ANALYSIS_RATE, FRAME_SIZE, HOP_SIZE } from "./features";
+export {
+  ANALYSIS_RATE,
+  extractOnsetCurve,
+  FRAME_SIZE,
+  HOP_SIZE,
+} from "./features";
 export type { KeyEstimate, MeterEstimate };
 
 /** 진행 상황. 화면이 멈춘 것처럼 보이지 않게 하는 용도 */

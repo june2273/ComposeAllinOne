@@ -289,6 +289,27 @@ export function extractFeatures(
 }
 
 /**
+ * 노트 분할이 쓸 온셋 곡선. **믹스가 아니라 보컬 스템에 건다.**
+ *
+ * `core/transcribe`의 `OnsetCurve`와 같은 모양이다(구조만 맞추고 서로
+ * import하지 않는다 — 두 모듈 다 의존성이 없어야 하고, 잇는 것은 위층의 일이다).
+ *
+ * **왜 여기 있나.** f0는 같은 음을 두 번 부른 것을 표현할 수 없다 — 커브가
+ * 평평하다. 경계의 증거를 음정 밖에서 받아야 하고, 그 증거를 이미 만들고 있는
+ * 것이 SuperFlux ODF다(비트 추적용). 새로 짤 것이 없어서 이것부터 해 봤다.
+ *
+ * 크로마·저역·조율까지 함께 계산되는 것은 낭비지만, `extractFeatures`를 쪼개면
+ * 검증된 루프가 둘로 갈린다. 4분 곡에 수 초라 그대로 둔다.
+ */
+export function extractOnsetCurve(
+  samples: Float32Array,
+  sampleRate: number,
+): { readonly hopMs: number; readonly strength: Float32Array } {
+  const { onset, fps } = extractFeatures(samples, sampleRate);
+  return { hopMs: 1000 / fps, strength: normalizeOnset(onset, fps) };
+}
+
+/**
  * ODF를 템포·비트 단계가 쓸 형태로 다듬는다.
  *
  * 이동평균을 빼고 반파 정류한 뒤 표준편차로 나눈다. 이유는 셋이다 — 곡의

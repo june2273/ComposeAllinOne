@@ -18,9 +18,11 @@
 import {
   ANALYSIS_RATE,
   analyzeAudio,
+  extractOnsetCurve,
   type AnalysisProgress,
   type AnalysisReport,
 } from "../core/analysis";
+import type { OnsetCurve } from "../core/transcribe";
 
 export type { AnalysisProgress, AnalysisReport };
 
@@ -179,4 +181,52 @@ export async function analyzeFile(
   // 워커가 없으면 같은 스레드에서 도는데, 그때는 중간에 끊을 자리가 없다
   if (!worker) return analyzeAudio(samples, sampleRate, forward);
   return runInWorker(worker, samples, sampleRate, forward, signal);
+}
+
+/**
+ * 오디오 하나에서 온셋 곡선만 뽑는다. **보컬 스템을 넣는다.**
+ *
+ * 전사의 노트 분할이 쓰는 것이다 — f0는 같은 음을 두 번 부른 것을 표현할 수
+ * 없어서 경계의 증거를 밖에서 받아야 한다(`core/transcribe/notes.ts`).
+ *
+ * `analyzeFile`과 같은 워커를 쓰지만 진행률은 보고하지 않는다. STFT 한 번이라
+ * 4분 곡에 1초 안쪽이고, 그 앞의 스템 분리가 이미 몇 분 걸린 뒤다.
+ */
+export async function extractOnset(
+  audio: Blob,
+  env: AnalyzeEnv = {},
+  signal?: AbortSignal,
+): Promise<OnsetCurve> {
+  const bytes = await audio.arrayBuffer();
+  const decode = env.decode ?? decodeWithBrowser;
+  const { samples, sampleRate } = await decode(bytes);
+
+  const worker = (env.makeWorker ?? defaultWorker)();
+  if (!worker) return extractOnsetCurve(samples, sampleRate);
+  return new Promise((resolve, reject) => {
+    if (signal) {
+      const abort = () => {
+        worker.terminate();
+        reject(new DOMException("분석을 취소했습니다", "AbortError"));
+      };
+      if (signal.aborted) {
+        abort();
+        return;
+      }
+      signal.addEventListener("abort", abort, { once: true });
+    }
+    worker.onmessage = (event: MessageEvent) => {
+      const data = event.data as
+        | { type: "onset"; curve: OnsetCurve }
+        | { type: "error"; message: string };
+      worker.terminate();
+      if (data.type === "onset") resolve(data.curve);
+      else reject(new Error(data.message));
+    };
+    worker.onerror = (event) => {
+      worker.terminate();
+      reject(new Error(event.message || "분석 워커가 죽었습니다"));
+    };
+    worker.postMessage({ job: "onset", samples, sampleRate }, [samples.buffer]);
+  });
 }
