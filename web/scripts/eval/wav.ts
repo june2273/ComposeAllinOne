@@ -9,6 +9,11 @@
  * 던지는 편이 낫다.
  */
 
+import { readFileSync } from "node:fs";
+
+import { ANALYSIS_RATE } from "../../src/core/analysis";
+import { resample } from "../../src/platform/analyze";
+
 /** 앞 4바이트가 무슨 청크인지 */
 function tag(view: DataView, at: number): string {
   return String.fromCharCode(
@@ -94,4 +99,32 @@ export function decodeWav(bytes: ArrayBuffer): Wav {
     }
   }
   return { samples: out, sampleRate, channels };
+}
+
+/**
+ * 인터리브 다채널 → 모노. 채널 평균은 브라우저 `downmix`와 같은 규칙이다.
+ */
+export function toMono(samples: Float32Array, channels: number): Float32Array {
+  if (channels <= 1) return samples;
+  const out = new Float32Array(Math.floor(samples.length / channels));
+  for (let i = 0; i < out.length; i += 1) {
+    let sum = 0;
+    for (let c = 0; c < channels; c += 1) sum += samples[i * channels + c];
+    out[i] = sum / channels;
+  }
+  return out;
+}
+
+/**
+ * WAV 파일 하나를 `ANALYSIS_RATE` 모노로. **하니스가 오디오를 읽는 유일한 길이다.**
+ *
+ * 읽기·다운믹스·리샘플이 세 조각으로 흩어져 있으면 스크립트마다 조금씩 다르게
+ * 조합하게 되고, 그러면 같은 곡을 재도 스크립트에 따라 숫자가 달라진다.
+ */
+export function loadMono(path: string, rate: number = ANALYSIS_RATE): Float32Array {
+  const bytes = readFileSync(path);
+  const wav = decodeWav(
+    bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
+  );
+  return resample(toMono(wav.samples, wav.channels), wav.sampleRate, rate);
 }

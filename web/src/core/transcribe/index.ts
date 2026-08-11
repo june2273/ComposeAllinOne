@@ -47,6 +47,7 @@ export type { NoteEvent, NoteOptions, OnsetCurve, PitchCurve } from "./notes";
 export {
   hzToMidi,
   midiToHz,
+  onsetPeaks,
   segmentNotes,
   tuningDriftCents,
   tuningResidualCents,

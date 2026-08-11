@@ -329,6 +329,10 @@ def cmd_truth(args: argparse.Namespace) -> int:
 
     song["truth"] = f"truth/{out.name}"
     song["truthSource"] = str(src)
+    # **음표 수를 여기서 적어 둔다.** 굽는 쪽은 이미 세어 놓았는데, 이걸 안
+    # 적으면 표를 그리는 도구마다 MIDI를 다시 파싱하게 된다 — 실제로 그러다
+    # 러닝 스테이터스를 놓쳐 세 곡이 나란히 58개씩 모자란 적이 있다.
+    song["truthNotes"] = len(notes)
     save_songs(list(songs.values()))
     print(f"{len(notes)}음 · {bpm:g} BPM → {out}")
     return 0

@@ -35,8 +35,7 @@ import {
   transcribe,
   type PitchCurve,
 } from "../../src/core/transcribe";
-import { resample } from "../../src/platform/analyze";
-import { decodeWav } from "./wav";
+import { loadMono } from "./wav";
 
 const CACHE = process.env.EVAL_CACHE ?? "../server/cache";
 const F0_DIR = process.env.EVAL_F0 ?? "/tmp/f0";
@@ -57,40 +56,24 @@ function slotOf(file: string): string {
   return basename(file).split("-")[0];
 }
 
-/** 인터리브 다채널 → 모노. 채널 평균은 브라우저 `downmix`와 같은 규칙이다 */
-function mono(samples: Float32Array, channels: number): Float32Array {
-  if (channels <= 1) return samples;
-  const out = new Float32Array(Math.floor(samples.length / channels));
-  for (let i = 0; i < out.length; i += 1) {
-    let sum = 0;
-    for (let c = 0; c < channels; c += 1) sum += samples[i * channels + c];
-    out[i] = sum / channels;
-  }
-  return out;
+/** 슬롯 안의 WAV 하나 */
+function slotAudio(slot: string, name: string): Float32Array {
+  return loadMono(join(CACHE, slot, name));
 }
 
 /**
  * 곡 하나의 브라우저측 분석. **슬롯마다 한 번만 한다** — 같은 곡의 커브가
  * 12벌이라도 비트 그리드는 하나다(그리고 이게 이 스크립트에서 제일 느리다).
  */
-/** 슬롯 안의 WAV 하나를 `ANALYSIS_RATE` 모노로 */
-function loadMono(slot: string, name: string): Float32Array {
-  const bytes = readFileSync(join(CACHE, slot, name));
-  const wav = decodeWav(
-    bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
-  );
-  return resample(mono(wav.samples, wav.channels), wav.sampleRate, ANALYSIS_RATE);
-}
-
 function analyzeSlot(slot: string): AnalysisReport {
-  return analyzeAudio(loadMono(slot, "input.wav"), ANALYSIS_RATE);
+  return analyzeAudio(slotAudio(slot, "input.wav"), ANALYSIS_RATE);
 }
 
 /**
  * 보컬 스템의 온셋 곡선. **슬롯마다 한 번만** — 문턱을 몇 개 훑든 곡선은 하나다.
  */
 function onsetOf(slot: string): OnsetCurve {
-  return extractOnsetCurve(loadMono(slot, ONSET_FROM), ANALYSIS_RATE);
+  return extractOnsetCurve(slotAudio(slot, ONSET_FROM), ANALYSIS_RATE);
 }
 
 test("캐시된 곡의 f0 커브를 전부 MIDI로 굽는다", { timeout: 30 * 60_000 }, () => {

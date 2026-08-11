@@ -355,25 +355,16 @@ function emit(
 }
 
 /**
- * 온셋 곡선에서 봉우리를 골라 **f0 커브의 프레임 번호로** 돌려준다.
+ * 온셋 곡선의 봉우리. **온셋 곡선 자신의 프레임 번호**로 돌려준다.
  *
- * 두 커브의 홉이 다르다(ODF 11.6ms · RMVPE 10ms). 프레임 번호끼리 맞추면
- * 곡 끝에서 수십 초가 어긋나므로 **시간으로 옮긴다.**
+ * 판정은 `국소 최대 + 문턱 + 불응기` 셋이다. 온셋 검출의 상투적인 조합이고
+ * (Böck et al., ISMIR 2012), 여기서는 뒤에 DP가 없으므로 이것이 판단의 전부다.
  *
- * 봉우리 판정은 `국소 최대 + 문턱 + 불응기` 셋이다. 온셋 검출의 상투적인
- * 조합이고(Böck et al.), 여기서는 뒤에 DP가 없으므로 이것이 판단의 전부다.
- *
- * **ODF는 온셋을 24ms쯤 이르게 잡는다**(`analysis/features.ts` 주석 — 플럭스가
- * 값이 아니라 기울기를 보기 때문이다). 보정하지 않는다: 편향의 크기가 온셋
- * 모양에 달려 있어 한 값으로 빼면 다른 쪽이 틀어지고, 양자화가 어차피 격자로
- * 끌어당긴다.
+ * **밖으로 낸 이유는 진단 때문이다.** 문턱을 훑을 때 봉우리가 몇 개나 잡히는지
+ * 보려면 같은 규칙이 필요한데, 그걸 평가 스크립트에 다시 적으면 조용히 갈라져서
+ * **재려던 것과 다른 것을 재게 된다**(`scripts/eval/onset.eval.ts`).
  */
-function pickOnsets(
-  onset: OnsetCurve,
-  minStrength: number,
-  f0HopMs: number,
-  f0Frames: number,
-): number[] {
+export function onsetPeaks(onset: OnsetCurve, minStrength: number): number[] {
   const { strength, hopMs } = onset;
   const count = strength.length;
   if (!(hopMs > 0) || count === 0) return [];
@@ -396,7 +387,31 @@ function pickOnsets(
     }
     if (!peak) continue;
     last = t;
-    const frame = Math.round((t * hopMs) / f0HopMs);
+    out.push(t);
+  }
+  return out;
+}
+
+/**
+ * 봉우리를 **f0 커브의 프레임 번호로** 옮긴다.
+ *
+ * 두 커브의 홉이 다르다(ODF 11.6ms · RMVPE 10ms). 프레임 번호끼리 맞추면
+ * 곡 끝에서 수십 초가 어긋나므로 **시간으로 옮긴다.**
+ *
+ * **ODF는 온셋을 24ms쯤 이르게 잡는다**(`analysis/features.ts` 주석 — 플럭스가
+ * 값이 아니라 기울기를 보기 때문이다). 보정하지 않는다: 편향의 크기가 온셋
+ * 모양에 달려 있어 한 값으로 빼면 다른 쪽이 틀어지고, 양자화가 어차피 격자로
+ * 끌어당긴다.
+ */
+function pickOnsets(
+  onset: OnsetCurve,
+  minStrength: number,
+  f0HopMs: number,
+  f0Frames: number,
+): number[] {
+  const out: number[] = [];
+  for (const t of onsetPeaks(onset, minStrength)) {
+    const frame = Math.round((t * onset.hopMs) / f0HopMs);
     if (frame > 0 && frame < f0Frames) out.push(frame);
   }
   return out;
