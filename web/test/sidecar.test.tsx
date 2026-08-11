@@ -239,7 +239,7 @@ describe("3. 화면 — 있을 때와 없을 때", () => {
         }),
     });
     expect(await screen.findByText(/pip install demucs/)).toBeTruthy();
-    expect(screen.getByText(/pip install basic-pitch/)).toBeTruthy();
+    expect(screen.getByText(/pip install rmvpe-onnx/)).toBeTruthy();
   });
 
   test("깔렸는데 안 돌면 무엇이 터졌는지 보여준다 — pip install을 권하지 않는다", async () => {
@@ -260,7 +260,7 @@ describe("3. 화면 — 있을 때와 없을 때", () => {
         }),
     });
     expect(await screen.findByText(/pkg_resources/)).toBeTruthy();
-    expect(screen.queryByText(/pip install basic-pitch/)).toBeNull();
+    expect(screen.queryByText(/pip install rmvpe-onnx/)).toBeNull();
   });
 
   test("진단 중에는 아무 말도 하지 않는다 — 곧 바뀔 문장을 띄우지 않는다", async () => {

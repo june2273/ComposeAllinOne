@@ -7,7 +7,7 @@
 라이선스 정보는 추측하지 않고 설치된 패키지 메타데이터와 배포처 원문에서 직접
 확인한 값이다. 확인 방법과 날짜는 각 항목의 "확인" 줄에 적었다.
 
-최종 갱신: 2026-08-10 (리듬 양자화 — 메트리컬 DP 알고리즘 출처 추가)
+최종 갱신: 2026-08-11 (멜로디 f0를 basic-pitch → RMVPE로 교체)
 
 ---
 
@@ -229,14 +229,44 @@ verovio는 **웹 번들에 통째로 들어간다**(`dist/assets/verovio-module-
 | 패키지 | 버전 | 코드 라이선스 | 가중치 | 활용처 |
 |---|---|---|---|---|
 | [demucs](https://github.com/adefossez/demucs) | 4.1.0 | **MIT** (`dist-info/licenses/LICENSE` 원문 확인) | 아래 참조 | `app/stems.py` — htdemucs 4스템 분리 |
-| [basic-pitch](https://github.com/spotify/basic-pitch) | 0.4.0 | **Apache-2.0** (`dist-info/LICENSE` 원문: "Copyright 2022 Spotify AB" + Apache License 2.0 전문) | 패키지 동봉 | `app/melody.py` — 프레임별 피치 활성 → f0 커브 |
+| [rmvpe-onnx](https://github.com/NewComer00/rmvpe-onnx) | 0.2.3 | **MIT** (`dist-info/licenses/LICENSE` 원문: "Copyright (c) 2026 NewComer00" + MIT 전문) | 아래 참조 (별도 다운로드) | `app/melody.py` — 보컬 f0 커브 |
 | [torch](https://pytorch.org/) | 2.13.0 | Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND MIT | — | demucs가 쓴다. Apple Silicon에서 MPS 가속 |
-| [onnxruntime](https://onnxruntime.ai/) | 1.28.0 | MIT | — | basic-pitch의 ONNX 백엔드 |
+| [onnxruntime](https://onnxruntime.ai/) | 1.28.0 | MIT | — | rmvpe-onnx의 추론 백엔드 |
 
-**basic-pitch의 메타데이터에는 라이선스 필드가 비어 있다.** `License-Expression`도
-`Classifier`도 없어서, 휠 안의 `basic_pitch-0.4.0.dist-info/LICENSE` 원문을 직접
-읽어 확인했다 — Apache License 2.0 전문이고 저작권자는 Spotify AB다. **메타데이터가
-비었다고 라이선스가 없는 것이 아니므로 추측하지 말고 늘 원문을 볼 것.**
+> **basic-pitch(0.4.0, Apache-2.0, Spotify AB)는 2026-08-11에 제거했다.** 멜로디
+> f0를 RMVPE로 갈아끼우면서 빠졌다 — 실곡 대조에서 정확 매칭이 189 → 515로
+> 올랐다(CLAUDE.md의 측정 표). 함께 빠진 것: `resampy`(basic-pitch 전용
+> 의존성)·`pretty_midi`(쓰지 않았다). **`setuptools<81` 핀도 이때 사라졌다** —
+> `pkg_resources`를 부르던 것이 resampy 하나뿐이었기 때문이다.
+> 그 시절 확인해 둔 사실 하나는 남겨 둔다: basic-pitch는 메타데이터의
+> `License-Expression`도 `Classifier`도 비어 있어서 휠 안의 `LICENSE` 원문을
+> 직접 읽어야 라이선스를 알 수 있었다. **메타데이터가 비었다고 라이선스가 없는
+> 것이 아니므로 추측하지 말고 늘 원문을 볼 것.**
+
+**RMVPE의 라이선스 사슬 — 3단이다** (확인일 2026-08-11)
+
+이 패키지는 **남의 코드를 감싸고 남의 가중치를 받아 오는** 구조라, 우리가 확인할
+것이 하나가 아니다. 세 단을 각각 원문에서 봤다.
+
+1. **패키지(`rmvpe-onnx`)** — MIT. `dist-info/licenses/LICENSE`에 MIT 전문,
+   저작권자 NewComer00. `importlib.metadata`의 `License` 필드도 MIT.
+2. **감싼 코드** — RVC 프로젝트([RVC-Project/Retrieval-based-Voice-Conversion](https://github.com/RVC-Project/Retrieval-based-Voice-Conversion))의
+   `rvc/lib/rmvpe.py`에서 왔다고 `model.py` 헤더가 밝힌다(MIT, Copyright 2023
+   liujing04 · 源文雨 · Ftps).
+3. **가중치(`rmvpe.onnx`, 362MB)** — HuggingFace [`lj1995/VoiceConversionWebUI`](https://huggingface.co/lj1995/VoiceConversionWebUI)에서
+   **첫 사용 때 내려받는다**(SHA-256 `5370e71a…3660fd` 고정 검증, 우리 쪽에서도
+   일치 확인). 패키지 헤더는 이 저장소를 MIT로 적는다.
+
+원 모델은 **[Dream-High/RMVPE](https://github.com/Dream-High/RMVPE) — Apache-2.0**
+(GitHub API의 `license.spdx_id`로 확인). 논문은 Wei et al., "RMVPE: A Robust Model
+for Vocal Pitch Estimation in Polyphonic Music", Interspeech 2023
+([arXiv 2306.15412](https://arxiv.org/abs/2306.15412)).
+
+**가중치는 htdemucs와 같은 부류의 미확인 항목으로 둔다.** 위 3단은 전부 "코드
+저장소가 자기 라이선스를 뭐라고 적었는가"이고, **가중치 파일 자체에 붙은 라이선스
+문서를 본 것이 아니다.** 개인 사용에는 문제가 없지만 배포·수익화 시점에 반드시
+다시 확인할 것 — 특히 원 모델(Apache-2.0)에서 변환된 파일이 재배포 저장소의
+MIT 표기 아래 있는 것이 맞는지.
 
 **모델 가중치**
 
@@ -245,30 +275,39 @@ verovio는 **웹 번들에 통째로 들어간다**(`dist/assets/verovio-module-
   저장소의 README는 코드에 대해 MIT를 명시하지만 **가중치 파일 자체의 라이선스는
   별도로 확인하지 않았다.** 개인 사용에는 문제가 없고, 배포·수익화 시점에 반드시
   원문을 확인할 것(사양서 §10의 같은 경고).
-- **basic-pitch**: `basic_pitch/saved_models/icassp_2022/`에 `nmp.onnx`·`nmp.tflite`·
-  `nmp.mlpackage`가 **패키지에 동봉**되어 온다. 패키지 전체가 Apache-2.0이므로
-  가중치도 그 아래에 있다고 본다.
+- **RMVPE**: 위 3단 참조. 패키지에 **동봉되지 않고** 첫 사용 때
+  `rmvpe_onnx/data/rmvpe.onnx`로 받는다(362MB). basic-pitch가 2.5MB짜리를 동봉해
+  오던 것과 정반대라, 기동 자가진단이 "가중치가 있을 때만 추론해 본다"로 바뀌었다
+  (`app/melody.py`의 `selftest`).
 
 ### 딸려 오는 것 중 주의할 것
 
 | 패키지 | 버전 | 라이선스 | 메모 |
 |---|---|---|---|
 | [lameenc](https://github.com/chrisstaite/lameenc) | 1.8.4 | **LGPL-3.0-or-later** | demucs가 MP3로 내보낼 때만 쓴다. **우리는 WAV만 쓰므로 부르지 않는다.** 배포 형태를 정할 때 이 의존성을 뺄 수 있는지 볼 것 |
-| [librosa](https://librosa.org/) | 0.11.0 | ISC | basic-pitch가 끌고 온다. 우리 코드는 직접 부르지 않는다 |
-| [resampy](https://github.com/bmcfee/resampy) | 0.4.2 | ISC | librosa가 끌고 온다. **`pkg_resources`를 import하므로 `setuptools<81`이 필요하다**(아래) |
-| [scipy](https://scipy.org/) | 1.17.1 | BSD-3-Clause | librosa가 끌고 온다 |
+| [librosa](https://librosa.org/) | 0.11.0 | ISC | **rmvpe-onnx가 직접 요구한다**(리샘플·모노 다운믹스). 예전에는 basic-pitch가 끌고 오던 것이다. 우리 코드는 직접 부르지 않는다 |
+| [scipy](https://scipy.org/) | 1.17.1 | BSD-3-Clause | rmvpe-onnx(창 함수)와 librosa가 요구한다 |
+| [huggingface-hub](https://github.com/huggingface/huggingface_hub) | 1.27.0 | Apache-2.0 | rmvpe-onnx가 가중치를 받을 때, demucs가 htdemucs를 받을 때 |
 | [julius](https://github.com/adefossez/julius) | 0.2.8 | MIT | demucs의 리샘플러 |
 | [einops](https://github.com/arogozhnikov/einops) | 0.8.2 | MIT | demucs |
-| [pretty_midi](https://github.com/craffel/pretty-midi) | 0.2.11 | MIT | basic-pitch의 MIDI 출력. **우리는 쓰지 않는다** — MIDI는 `web/src/core/transcribe/midi.ts`가 직접 쓴다 |
-| [setuptools](https://setuptools.pypa.io/) | <81 (고정) | MIT | 버전 제약이 있다. 81에서 `pkg_resources`가 제거됐는데 resampy가 아직 그것을 import한다 |
 
-### 환경 제약 (실측 2026-08-09)
+> 2026-08-11에 함께 빠진 것: **resampy**(ISC — basic-pitch 전용이었다),
+> **pretty_midi**(MIT — 쓰지 않았다), **setuptools 버전 핀**.
 
-- **Python 3.11이 필요하다.** 3.14에서는 `basic-pitch`가 낡은 `numpy`를 소스
-  빌드하려다 실패한다(`pkgutil.ImpImporter` 제거 때문). ML 생태계가 파이썬
-  릴리스를 따라오는 데 시간이 걸리므로 3.11로 고정한다.
-- **`setuptools<81`.** 82에서 `pkg_resources`가 사라졌고 `resampy`가 그것을
-  import한다. 최신 setuptools를 쓰면 f0 추출이 `ModuleNotFoundError`로 죽는다.
+### 환경 제약 (실측 2026-08-09, 2026-08-11 갱신)
+
+- **Python 3.11이 필요하다.** 처음 이걸 확인한 것은 basic-pitch가 3.14에서 낡은
+  `numpy`를 소스 빌드하려다 실패했을 때다(`pkgutil.ImpImporter` 제거). 그 패키지는
+  빠졌지만 **제약은 유지한다** — torch 계열도 파이썬 릴리스를 늦게 따라온다.
+  패키지 하나의 사정이 아니라 ML 생태계 전반의 사정이었다.
+- **`setuptools<81` 핀은 없앴다**(2026-08-11). `pkg_resources`를 import하던 것은
+  `resampy`뿐이었고(librosa는 테스트 extra에서만 요구한다 — 실측), resampy를
+  요구하던 것은 basic-pitch뿐이었다. 지금은 의존성 전체를 import해도
+  `sys.modules`에 `pkg_resources`가 올라오지 않는다(실측).
+- **RMVPE는 CPU로 돌린다.** onnxruntime이 Apple Silicon에서 CoreML을 고르면
+  긴 곡에서 죽는다 — 255초(25502프레임)에서 `Error executing model: Error in
+  building plan`(실측). **1초짜리 사인파로는 멀쩡히 돌아서** 자가진단을 통과하고
+  첫 실곡에서 터진다. CPU가 같은 곡을 3.9초에 끝내므로(약 65배속) 장치를 고정했다.
 
 ---
 

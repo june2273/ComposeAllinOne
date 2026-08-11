@@ -6,8 +6,12 @@
   "extends": "./tsconfig.app.json",
   "compilerOptions": {
     "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.test.tsbuildinfo",
-    "types": ["vite/client", "vitest/globals"],
+    /* `node`는 scripts/eval 때문에 필요하다 — 거기서 파일을 직접 읽는다 */
+    "types": ["vite/client", "vitest/globals", "node"],
     "composite": true
   },
-  "include": ["test", "src"]
+  /* `scripts/eval`도 함께 본다. 평가 하니스는 `npm test`에서 빠져 있어(vitest가
+     `.eval.ts`를 안 잡는다) 여기서 검사하지 않으면 **아무도 안 본다** —
+     그러다 core의 타입이 바뀌면 정작 재야 할 때 안 돌아간다. */
+  "include": ["test", "src", "scripts/eval"]
 }

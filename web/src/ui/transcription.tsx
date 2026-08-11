@@ -152,7 +152,7 @@ export function TranscriptionPanel({
             ok={health.models.melody}
             check={health.checks?.melody}
             missing="멜로디 모델이 없어 음표가 나오지 않는다"
-            install="pip install basic-pitch"
+            install="pip install rmvpe-onnx"
             broken="멜로디 모델이 깔려 있지만 이 환경에서 돌지 않는다"
           />
         </>

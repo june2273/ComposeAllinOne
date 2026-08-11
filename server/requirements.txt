@@ -1,21 +1,18 @@
 # 분석 사이드카. **web/의 빌드 도구용 .venv와 섞지 말 것** — torch가 수 GB다.
 #
-# **파이썬 3.11이어야 한다.** 3.14에서는 basic-pitch가 낡은 numpy를 소스
-# 빌드하려다 `pkgutil.ImpImporter` 제거 때문에 깨진다(실측 2026-08-09).
+# **파이썬 3.11이어야 한다.** demucs가 끌고 오는 torch 계열이 새 파이썬을 늦게
+# 따라온다. (3.14에서 깨지는 것을 처음 확인한 것은 basic-pitch였는데 그건
+# 2026-08-11에 빠졌다 — 그래도 3.11 고정은 유지한다. ML 생태계 전반의 사정이지
+# 패키지 하나의 사정이 아니었다.)
 #
 # 라이선스는 citation.md 2-2절에 기록한다. 버전을 올릴 때 라이선스가 바뀌지
 # 않았는지 함께 확인할 것.
-
-# --- 버전을 고정해야 하는 것 -------------------------------------------------
 #
-# setuptools 81에서 `pkg_resources`가 제거됐는데 `resampy`(librosa →
-# basic-pitch)가 아직 그것을 import한다. 최신 setuptools를 쓰면 f0 추출이
-# `ModuleNotFoundError: No module named 'pkg_resources'`로 죽는다.
-#
-# **이 사고는 조용하다** — import 시점이 아니라 실행 시점에 터지므로 서버는
-# 멀쩡히 뜨고 /health도 초록으로 나온다. 그래서 app/melody.py에 기동 자가진단을
-# 따로 두었다(`selftest`). 이 핀과 그 진단은 같은 사고를 앞뒤로 막는 것이다.
-setuptools<81
+# > **`setuptools<81` 핀이 있었는데 없앴다**(2026-08-11). `pkg_resources`를
+# > import하던 것은 `resampy`였고, resampy를 요구하던 것은 basic-pitch뿐이었다
+# > (librosa는 테스트 extra에서만 쓴다 — 실측). 멜로디 모델을 RMVPE로 바꾸면서
+# > 그 사슬이 통째로 빠졌고, 지금은 어떤 의존성도 `pkg_resources`를 부르지
+# > 않는다(실측: 전부 import한 뒤 `sys.modules`에 없다).
 
 # --- 서버 뼈대 ---------------------------------------------------------------
 fastapi
@@ -27,7 +24,7 @@ soundfile
 # --- 모델. 없어도 서버는 뜨고 /health가 false를 돌려준다 ---
 # 설치 순서에 유의: torch를 먼저 깔고 나머지를 붙이는 편이 해석이 빠르다.
 demucs                    # 스템 분리 (htdemucs)
-basic-pitch[onnx]         # 멜로디 f0
+rmvpe-onnx                # 멜로디 f0. 가중치 362MB는 첫 사용 때 따로 받는다
 
 # --- 개발 전용 ---------------------------------------------------------------
 pytest

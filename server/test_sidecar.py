@@ -12,6 +12,7 @@ cd server && .venv/bin/python -m pytest -q
 from __future__ import annotations
 
 import io
+import json
 import threading
 import wave
 from pathlib import Path
@@ -19,7 +20,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from app import melody
+from app import main, melody
 from app.audio import Audio, gate, highpass, normalize, process_vocal, resample
 from app.jobs import JobStore, digest_of
 
@@ -92,37 +93,72 @@ def test_process_vocal_returns_same_rate_and_length():
 # --- f0 커브 ----------------------------------------------------------------
 
 
-def test_curve_from_activation_picks_strongest_bin():
-    # 88열 중 A4(MIDI 69) 자리 = 69 - 21 = 48
-    activation = np.zeros((50, 88), dtype=np.float32)
-    activation[:, 48] = 0.9
-    curve = melody.curve_from_activation(activation)
+def test_curve_keeps_confident_frames():
+    frequency = np.full(50, 440.0)
+    confidence = np.full(50, 0.9)
+    curve = melody.curve_from_prediction(frequency, confidence)
     assert curve["hopMs"] == melody.HOP_MS
     assert all(abs(v - 440.0) < 1.0 for v in curve["f0"])
 
 
-def test_curve_from_activation_marks_weak_frames_unvoiced():
-    activation = np.zeros((50, 88), dtype=np.float32)
-    activation[:, 48] = 0.05  # MIN_PROBABILITY 아래
-    curve = melody.curve_from_activation(activation)
+def test_curve_marks_low_confidence_frames_unvoiced():
+    frequency = np.full(50, 440.0)
+    confidence = np.full(50, 0.01)  # MIN_CONFIDENCE 아래
+    curve = melody.curve_from_prediction(frequency, confidence)
     assert set(curve["f0"]) == {0.0}
 
 
-def test_curve_interpolates_between_semitones():
-    """이웃 칸이 함께 켜져 있으면 반음 사이가 나와야 한다.
+def test_curve_drops_pitches_outside_our_range():
+    """무성 구간에서도 모델은 주파수를 하나 내놓는다.
 
-    안 하면 커브가 반음 계단이 되어 비브라토·벤드가 통째로 사라진다.
+    걸러내지 않으면 그 값들이 그대로 음표가 된다. 확신에 차 있어도 음역 밖이면
+    노래가 아니다 — 여기가 그 유일한 방어선이다.
     """
-    activation = np.zeros((10, 88), dtype=np.float32)
-    activation[:, 48] = 0.9
-    activation[:, 49] = 0.85  # 위 이웃이 거의 같은 세기 = 그 사이
-    curve = melody.curve_from_activation(activation)
-    assert all(v > 441.0 for v in curve["f0"])
+    # MIN_MIDI(36) 한참 아래와 MAX_MIDI(96) 한참 위
+    frequency = np.array([20.0, 12000.0, 440.0])
+    confidence = np.full(3, 0.9)
+    curve = melody.curve_from_prediction(frequency, confidence)
+    assert curve["f0"][0] == 0.0
+    assert curve["f0"][1] == 0.0
+    assert curve["f0"][2] > 0.0
 
 
-def test_empty_activation_is_empty_curve():
-    curve = melody.curve_from_activation(np.zeros((0, 88), dtype=np.float32))
+def test_curve_keeps_pitch_between_semitones():
+    """반음으로 반올림하지 않는다.
+
+    하면 비브라토·벤드가 통째로 사라지고, 40센트 밀린 음원의 조율 보정도
+    할 수 없게 된다(그건 `core/transcribe`가 커브를 보고 하는 일이다).
+    """
+    frequency = np.full(10, 452.0)  # A4와 A#4 사이
+    curve = melody.curve_from_prediction(frequency, np.full(10, 0.9))
+    assert all(abs(v - 452.0) < 0.5 for v in curve["f0"])
+
+
+def test_empty_prediction_is_empty_curve():
+    curve = melody.curve_from_prediction(np.zeros(0), np.zeros(0))
     assert curve["f0"] == []
+
+
+def test_merge_takes_pitch_from_one_and_voicing_from_the_other():
+    """음정은 믹스에서, 유·무성은 분리 보컬에서."""
+    pitch = {"hopMs": 10.0, "f0": [440.0, 880.0, 660.0], "confidence": [0.9, 0.9, 0.9]}
+    voicing = {"hopMs": 10.0, "f0": [220.0, 0.0, 220.0], "confidence": [0.5, 0.0, 0.5]}
+    merged = melody.merge_voicing(pitch, voicing)
+    # 값은 앞쪽 것, 구멍은 뒤쪽 것
+    assert merged["f0"] == [440.0, 0.0, 660.0]
+    assert merged["confidence"] == [0.9, 0.0, 0.9]
+
+
+def test_merge_stops_at_the_shorter_curve():
+    """길이가 다르면 짧은 쪽에서 끝낸다.
+
+    한쪽이 길다고 마스크 없이 통과시키면 **거기서부터 유령이 쏟아진다** —
+    마스크가 없는 구간은 곧 원본 믹스를 그대로 쓰는 구간이다.
+    """
+    pitch = {"hopMs": 10.0, "f0": [440.0] * 5, "confidence": [0.9] * 5}
+    voicing = {"hopMs": 10.0, "f0": [220.0] * 2, "confidence": [0.5] * 2}
+    merged = melody.merge_voicing(pitch, voicing)
+    assert merged["f0"] == [440.0, 440.0]
 
 
 def test_silent_curve_matches_duration():
@@ -165,8 +201,10 @@ def test_probe_marks_working_model_ok():
 def test_probe_catches_import_that_works_but_run_that_fails():
     """이 사고가 이 파일 전체의 존재 이유다.
 
-    `resampy`가 `pkg_resources`를 import하는데 setuptools 81이 그것을 없앴다.
-    `import basic_pitch`는 성공하고 /health도 초록으로 뜨는데 f0만 죽는다.
+    실제로 겪은 것: `resampy`가 `pkg_resources`를 import하는데 setuptools 81이
+    그것을 없앴다. `import basic_pitch`는 성공하고 /health도 초록으로 뜨는데
+    f0만 죽었다. 그 사슬은 2026-08-11에 RMVPE로 갈아타며 빠졌지만 **부류가
+    사라진 것은 아니다** — import되는 것과 도는 것은 여전히 다른 문제다.
     """
     from app.health import Probe
 
@@ -426,6 +464,55 @@ def test_half_written_cache_is_not_a_hit(client, tmp_path: Path):
     assert again["cached"] is False
     poll(client, again["jobId"])
     assert client.get(f"/jobs/{again['jobId']}/meta").status_code == 200
+
+
+def test_other_engine_curve_is_not_a_hit(client, tmp_path: Path):
+    """멜로디 엔진을 갈아끼우면 캐시된 곡도 다시 뽑아야 한다.
+
+    슬롯 이름이 파일 내용 해시뿐이라, 이걸 안 보면 모델을 바꿔도 이미 분석한
+    곡은 옛 커브를 돌려준다 — 그리고 **모델을 바꾼 직후에 가장 많이 열어 보는
+    곡들**이 정확히 그 캐시에 들어 있다. "바꿨는데 똑같다"가 되는 자리다.
+    """
+    data = wav_bytes()
+    created = client.post("/jobs", files={"file": ("a.wav", data, "audio/wav")}).json()
+    poll(client, created["jobId"])
+
+    slot = next(p for p in tmp_path.iterdir() if (p / "meta.json").exists())
+    meta = json.loads((slot / "meta.json").read_text(encoding="utf-8"))
+    # 이 곡이 다른 엔진으로 분석된 것처럼 꾸민다
+    meta["hasMelody"] = True
+    meta["melodyEngine"] = "옛날모델"
+    (slot / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+    again = client.post("/jobs", files={"file": ("a.wav", data, "audio/wav")}).json()
+    assert again["cached"] is False
+    poll(client, again["jobId"])
+    # 다시 돈 결과에는 지금 엔진이 적혀 있고, 이제는 캐시가 맞는다
+    assert client.get(f"/jobs/{again['jobId']}/meta").status_code == 200
+    third = client.post("/jobs", files={"file": ("a.wav", data, "audio/wav")}).json()
+    assert third["cached"] is True
+
+
+def test_existing_stems_are_reused(tmp_path: Path):
+    """엔진이 바뀌어 다시 돌 때 htdemucs를 또 돌리지 않는다.
+
+    스템은 곡에만 달려 있다. f0를 다시 뽑겠다고 수 분짜리 분리를 함께 되돌리면
+    위 캐시 무효화가 "고쳤다"가 아니라 "느려졌다"가 된다.
+    """
+    stem_dir = tmp_path / "슬롯" / "stems"
+    stem_dir.mkdir(parents=True)
+    for name in main.stems.STEM_NAMES:
+        (stem_dir / f"{name}.wav").write_bytes(wav_bytes())
+    assert set(main._stem_paths(tmp_path / "슬롯")) == set(main.stems.STEM_NAMES)
+
+    # 잘려 쓰인 스템은 재사용하지 않는다. `wav_bytes()`는 아주 짧으므로,
+    # 곡이 그보다 길다고 말하면 전부 "쓰다 만 것"으로 잡혀야 한다 —
+    # 안 그러면 그 곡은 뒷부분이 없는 채로 조용히 전사된다
+    assert main._stem_paths(tmp_path / "슬롯", 60.0) == {}
+
+    # 하나만 없어도 재사용하지 않는다 — 반쯤 남은 디렉터리를 믿으면 안 된다
+    (stem_dir / f"{main.stems.STEM_NAMES[0]}.wav").unlink()
+    assert main._stem_paths(tmp_path / "슬롯") == {}
 
 
 def test_audio_name_is_allowlisted(client):

@@ -111,6 +111,36 @@ def _usable(name: str, installed: Callable[[], bool]) -> bool:
     return installed() if status == "checking" else status == "ok"
 
 
+#: 재사용할 스템이 원곡보다 이만큼 넘게 짧으면 쓰다 만 것으로 본다(초).
+#: 분리는 샘플 단위로 정렬되므로 정상이면 차이가 0에 가깝다.
+_STEM_TOLERANCE_SEC = 0.5
+
+
+def _stem_paths(out_dir: Path, duration: float | None = None) -> dict[str, Path]:
+    """이미 분리해 둔 스템. 성한 한 벌이 아니면 빈 표를 준다(= 다시 분리한다).
+
+    **길이까지 본다.** 파일 존재만 보면 분리 도중에 죽어 **잘려 쓰인 WAV**를
+    그대로 물려받는다 — 그러면 그 곡은 뒷부분이 통째로 없는 채로 전사되고,
+    오류가 하나도 안 난다. 캐시를 손으로 지우기 전까지 계속 그렇다.
+    헤더만 읽으므로(`sf.info`) 값이 싸다.
+    """
+    import soundfile as sf
+
+    stem_dir = out_dir / "stems"
+    paths = {name: stem_dir / f"{name}.wav" for name in stems.STEM_NAMES}
+    if not all(p.exists() for p in paths.values()):
+        return {}
+    if duration is None:
+        return paths
+    try:
+        for path in paths.values():
+            if duration - sf.info(str(path)).duration > _STEM_TOLERANCE_SEC:
+                return {}
+    except Exception:  # noqa: BLE001 — 못 읽는 파일도 다시 분리한다
+        return {}
+    return paths
+
+
 def _pipeline(job: Job, source: Path, out_dir: Path) -> Path:
     """분리 → 후처리 → f0. 진행률의 배분은 실측 비율에 맞춘 어림값이다."""
     report = store.progress(job)
@@ -123,12 +153,20 @@ def _pipeline(job: Job, source: Path, out_dir: Path) -> Path:
     if has_stems:
         stem_dir = out_dir / "stems"
         stem_dir.mkdir(parents=True, exist_ok=True)
-        paths = stems.separate(
-            audio,
-            stem_dir,
-            # 분리가 전체의 앞 80%를 차지한다고 본다
-            progress=lambda stage, ratio: report(stage, 0.05 + ratio * 0.75),
-        )
+        # **이미 있으면 다시 분리하지 않는다.** 슬롯은 내용 해시라 스템은 곡에만
+        # 달려 있는데, 멜로디 모델을 갈아끼우면 캐시가 미스가 된다(아래 `create_job`).
+        # 그때 수 분짜리 htdemucs를 다시 돌릴 이유가 없다 — 다시 뽑아야 하는 것은
+        # f0뿐이다. 분리는 끝났는데 f0를 쓰기 전에 서버가 죽은 경우도 여기서 산다.
+        paths = _stem_paths(out_dir, audio.duration)
+        if paths:
+            report("스템 재사용", 0.80)
+        else:
+            paths = stems.separate(
+                audio,
+                stem_dir,
+                # 분리가 전체의 앞 80%를 차지한다고 본다
+                progress=lambda stage, ratio: report(stage, 0.05 + ratio * 0.75),
+            )
         vocal_path = paths.get("vocals")
     else:
         # 모델이 없으면 원본을 보컬로 취급한다. 반주가 섞여 f0가 나빠지지만
@@ -142,11 +180,18 @@ def _pipeline(job: Job, source: Path, out_dir: Path) -> Path:
     write_audio(processed_path, processed)
 
     report("멜로디 추출", 0.88)
-    curve = (
-        melody.extract_f0(processed_path)
-        if has_melody
-        else melody.silent_curve(processed)
-    )
+    curve = melody.silent_curve(processed)
+    if has_melody:
+        curve = melody.extract_f0(processed_path)
+        if vocal_path is not None:
+            # **음정은 원본 믹스에서 다시 뽑아 덮는다**(`melody.merge_voicing`).
+            # 분리가 고음 보컬의 기본음을 깎으면 f0가 아래 옥타브로 내려앉는데,
+            # 믹스에는 그 성분이 남아 있다. 유·무성만 위 커브에서 물려받는다.
+            # 스템이 없을 때는 두 커브가 같은 신호라 섞을 것이 없다.
+            report("멜로디 추출(원본 믹스)", 0.94)
+            curve = melody.merge_voicing(
+                melody.extract_f0_from_samples(audio.samples, audio.rate), curve
+            )
     (out_dir / "f0.json").write_text(json.dumps(curve), encoding="utf-8")
 
     (out_dir / "meta.json").write_text(
@@ -156,12 +201,51 @@ def _pipeline(job: Job, source: Path, out_dir: Path) -> Path:
                 "hasStems": has_stems,
                 "hasMelody": has_melody,
                 "stems": sorted(p.stem for p in (out_dir / "stems").glob("*.wav")),
+                # 이 커브를 만든 엔진. 캐시 적중 판정이 이걸 본다(`create_job`)
+                "melodyEngine": melody.ENGINE if has_melody else None,
             }
         ),
         encoding="utf-8",
     )
     report("완료", 1.0)
     return out_dir
+
+
+def _cache_hit(out_dir: Path) -> bool:
+    """이 슬롯의 결과를 그대로 써도 되는가.
+
+    **둘 다 있어야 한다.** `f0.json`만 보면, 그 사이에 서버가 죽어 `meta.json`을
+    못 쓴 디렉터리가 영영 "완료"로 잡힌다 — 작업은 즉시 끝나고 웹은 `/meta`에서
+    404를 받아 "결과를 받지 못했습니다"만 본다. 캐시를 손으로 지우기 전까지 그
+    곡은 계속 실패한다.
+
+    **엔진도 같아야 한다.** 슬롯 이름이 파일 내용 해시뿐이라, 멜로디 모델을
+    갈아끼워도 이미 분석한 곡은 옛 커브를 그대로 돌려준다. 그러면 사용자가 보는
+    것은 "모델을 바꿨는데 결과가 똑같다"이고, 하필 **모델을 바꾼 직후에 가장
+    많이 열어 보는 곡들**이 정확히 그 캐시에 들어 있다. 스템은 곡에만 달려
+    있으므로 버리지 않는다 — `_pipeline`이 재사용하고 f0만 다시 뽑는다.
+
+    **그때 없던 모델이 지금 있어도 다시 돈다.** 사이드카는 모델이 없으면 그
+    칸을 비운 채로 끝까지 가므로(무성 커브, 원본을 보컬로 취급), 그 결과가
+    캐시에 남는다. 나중에 모델을 깔고 같은 곡을 열면 **깔기 전의 빈 결과가
+    영영 돌아온다** — 사용자가 방금 한 일이 아무 효과가 없어 보인다.
+    반대 방향(그때 있던 모델이 지금 없다)에는 다시 돌지 않는다. 이미 좋은
+    결과가 있는데 굳이 나쁘게 만들 이유가 없다.
+    """
+    if not (out_dir / "f0.json").exists() or not (out_dir / "meta.json").exists():
+        return False
+    try:
+        meta = json.loads((out_dir / "meta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+
+    if _usable("stems", stems.available) and not meta.get("hasStems"):
+        return False
+    if _usable("melody", melody.available) and not meta.get("hasMelody"):
+        return False
+    if meta.get("hasMelody") and meta.get("melodyEngine") != melody.ENGINE:
+        return False
+    return True
 
 
 @app.post("/jobs")
@@ -172,11 +256,7 @@ async def create_job(file: UploadFile) -> dict:
 
     digest = digest_of(data)
     out_dir = store.slot(digest)
-    # **둘 다 있어야 캐시 적중이다.** `f0.json`만 보면, 그 사이에 서버가 죽어
-    # `meta.json`을 못 쓴 디렉터리가 영영 "완료"로 잡힌다 — 작업은 즉시 끝나고
-    # 웹은 `/meta`에서 404를 받아 "결과를 받지 못했습니다"만 본다. 캐시를 손으로
-    # 지우기 전까지 그 곡은 계속 실패한다.
-    if (out_dir / "f0.json").exists() and (out_dir / "meta.json").exists():
+    if _cache_hit(out_dir):
         # 캐시 적중. 작업을 만들되 곧바로 끝난 것으로 둔다 — 웹은 같은 경로로
         # 폴링하면 되므로 "캐시였다"는 것을 몰라도 된다.
         job = store.submit(lambda _job: out_dir)
