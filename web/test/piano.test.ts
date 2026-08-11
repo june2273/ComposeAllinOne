@@ -6,7 +6,7 @@
  */
 import { describe, expect, test, vi } from "vitest";
 
-import { SineSynth } from "../src/core/audio";
+import { NullSynth } from "../src/core/audio";
 import {
   type PianoManifest,
   type PianoRegion,
@@ -254,7 +254,11 @@ describe("음원이 없거나 덜 받아졌을 때", () => {
     }
   });
 
-  test("오디오가 아예 없는 환경에서는 사인 신스를 준다", () => {
-    expect(makeAudioBackend()).toBeInstanceOf(SineSynth);
+  // 사인 신스를 주면 안 된다 — 그쪽도 AudioContext를 만들기 때문에 첫 재생에서
+  // 터진다. 조용히 나는 것과 예외를 던지는 것은 다르다.
+  test("오디오가 아예 없는 환경에서는 소리 없는 백엔드를 준다", () => {
+    const backend = makeAudioBackend();
+    expect(backend).toBeInstanceOf(NullSynth);
+    expect(() => backend.playNotes([60], 1)).not.toThrow();
   });
 });

@@ -1,47 +1,24 @@
 /**
- * 오디오 백엔드.
+ * 오디오 백엔드 — **인터페이스와 순수 도우미만.**
  *
- * 기술검토서 7절의 교체 가능 인터페이스를 그대로 따른다.
+ * 기술검토서 7절의 교체 가능 인터페이스를 그대로 따른다. `AudioContext`를
+ * 부르는 구현은 여기 없다 — 사인 신스는 `platform/synth.ts`, 샘플 피아노는
+ * `platform/piano.ts`다. 이 파일이 브라우저를 모르는 덕에 세션 규칙 테스트가
+ * 오디오 장치 없이 돈다.
  *
  * Python/Qt판은 "전체 파형을 numpy로 미리 렌더한 뒤 던지는" 방식이었다.
  * GIL 때문에 오디오 콜백 안에서 연산하면 글리치가 나기 때문이었는데,
  * Web Audio는 스케줄링이 오디오 스레드에서 이뤄지므로 그 제약이 없다.
- * 대신 노드를 만들어 시각을 지정해 걸어 두면 된다.
  *
  * EQ·라우드니스·팬 청음이 필요로 하는 것들(BiquadFilterNode, GainNode,
  * StereoPannerNode)은 브라우저가 기본 제공한다 — Python판에서 "Protocol을
- * 바꿔야 한다"고 적어 둔 항목이 여기서는 노드 하나 끼우는 일이 된다.
- *
- * 샘플 기반 피아노(Upright Piano KW, CC0)는 아직 옮기지 않았다. 31MiB라
- * 웹에서는 로딩 전략(지연 로드·포맷 변환)을 먼저 정해야 한다.
+ * 바꿔야 한다"고 적어 둔 항목이 여기서는 노드 하나 끼우는 일이 된다. 다만
+ * `playNotes`로는 "이 소리에 처리를 걸어라"를 표현할 수 없어 **인터페이스
+ * 자체를 바꿔야 하고**, 그때 세 스테이지를 한꺼번에 설계해야 한다.
  */
 
 import type { PlayMode } from "./config";
 
-/**
- * 배음 비율.
- *
- * **3배음(12도 = 5도)만 유독 낮다.** 나머지 배음은 전부 옥타브 관계(1·2·4배)라
- * 기본음과 같은 음이름이지만, 3배음은 **다른 음이름**을 만든다. 여기가
- * 0.22였을 때 G4가 `G-G-D-G`로 울려 파워코드처럼 들렸다(실측: 오실레이터
- * 주파수 392·784·1176·1568Hz). 음높이를 맞히는 앱에서 한 음이 화음으로 들리면
- * 그 자체로 오답 요인이다.
- */
-export const HARMONICS = [1.0, 0.4, 0.09, 0.06];
-const ATTACK = 0.012;
-const DECAY = 0.09;
-const SUSTAIN_LEVEL = 0.72;
-const RELEASE = 0.3;
-/**
- * h번째 배음이 사는 시간 = duration / (h+1).
- *
- * 레벨이 끝까지 일정하면 귀가 배음을 **별개의 음으로 분리해서** 듣는다.
- * 실제 악기에서 배음이 하나의 음으로 뭉쳐 들리는 이유는 위 배음일수록 빨리
- * 사라지기 때문이다. 그 감쇠 차이를 여기서 만든다.
- */
-function partialLife(harmonic: number, duration: number): number {
-  return duration / (harmonic + 1);
-}
 /** 아르페지오 한 음 사이 간격. melody 모드는 음 길이만큼 벌린다. */
 export const ARPEGGIO_GAP_SEC = 0.18;
 
@@ -59,106 +36,10 @@ export interface AudioBackend {
   stop(): void;
 }
 
-/**
- * 사인파 가산합성 + ADSR.
- *
- * 순수 사인파는 음정 지각이 오히려 어려워서 배음을 3~4개 섞는다.
- * 피치가 수식으로 정확해서, 절대음고를 센트 단위로 다뤄야 하는 기능에는
- * 실제 녹음 샘플보다 이쪽이 낫다.
- */
-export class SineSynth implements AudioBackend {
-  private ctx: AudioContext | null = null;
-  private active: AudioScheduledSourceNode[] = [];
-
-  /**
-   * 브라우저는 사용자 제스처 전에는 오디오를 시작하지 못하게 한다.
-   * 첫 재생 시점에 만들고 resume한다.
-   */
-  private context(): AudioContext {
-    if (!this.ctx) this.ctx = new AudioContext();
-    if (this.ctx.state === "suspended") void this.ctx.resume();
-    return this.ctx;
-  }
-
-  private staggerSec(mode: PlayMode, duration: number): number {
-    if (mode === "block") return 0;
-    return mode === "arpeggio_up" ? ARPEGGIO_GAP_SEC : duration;
-  }
-
-  playNotes(
-    midiNotes: readonly number[],
-    duration: number,
-    mode: PlayMode = "block",
-    velocity = 80,
-  ): void {
-    if (!midiNotes.length) return;
-    this.stop();
-
-    const ctx = this.context();
-    const stagger = this.staggerSec(mode, duration);
-    // 화음일 때 클리핑 방지 — 동시에 울리는 음 수로 나눈다
-    const simultaneous = stagger === 0 ? midiNotes.length : 1;
-    const level = (velocity / 127) * 0.85 / Math.max(simultaneous, 1);
-    const harmonicSum = HARMONICS.reduce((a, b) => a + b, 0);
-
-    midiNotes.forEach((note, i) => {
-      const start = ctx.currentTime + i * stagger;
-      const freq = midiToFreq(note);
-
-      // 배음마다 자기 포락선을 갖는다. 하나의 포락선을 공유하면 모든 배음이
-      // 끝까지 같은 레벨로 울려 서로 다른 음처럼 분리되어 들린다.
-      HARMONICS.forEach((amp, h) => {
-        const partial = freq * (h + 1);
-        // 나이퀴스트를 넘는 배음은 앨리어싱만 만든다
-        if (partial >= ctx.sampleRate / 2) return;
-
-        const peak = level * (amp / harmonicSum);
-        const life = partialLife(h, duration);
-        // 자동화 이벤트의 시각이 뒤집히지 않도록 순서를 강제한다
-        const decayed = start + ATTACK + DECAY;
-        const hold = Math.max(start + life - RELEASE, decayed);
-        const end = Math.max(start + life, hold + ATTACK);
-
-        const env = ctx.createGain();
-        env.connect(ctx.destination);
-        const g = env.gain;
-        g.setValueAtTime(0, start);
-        g.linearRampToValueAtTime(peak, start + ATTACK);
-        g.linearRampToValueAtTime(peak * SUSTAIN_LEVEL, decayed);
-        g.setValueAtTime(peak * SUSTAIN_LEVEL, hold);
-        g.linearRampToValueAtTime(0, end);
-
-        const osc = ctx.createOscillator();
-        osc.frequency.value = partial;
-        osc.connect(env);
-        osc.start(start);
-        osc.stop(end + 0.02);
-        this.active.push(osc);
-        osc.onended = () => {
-          this.active = this.active.filter((n) => n !== osc);
-        };
-      });
-    });
-  }
-
-  stop(): void {
-    for (const node of this.active) {
-      try {
-        node.stop();
-      } catch {
-        // 이미 끝난 노드는 무시한다
-      }
-    }
-    this.active = [];
-  }
-}
-
 /** 소리를 내지 않는 백엔드. 테스트에서 오디오 장치를 피할 때 쓴다. */
 export class NullSynth implements AudioBackend {
-  playNotes(): void {}
+  // 인자를 받는 형태로 둔다. 생략하면 인터페이스는 만족하지만 `NullSynth`
+  // 타입 그대로 들고 부르는 곳(테스트)에서 "인자 0개" 오류가 난다.
+  playNotes(..._args: Parameters<AudioBackend["playNotes"]>): void {}
   stop(): void {}
-}
-
-export function makeDefaultBackend(): AudioBackend {
-  return typeof AudioContext === "undefined" ? new NullSynth() : new SineSynth();
 }

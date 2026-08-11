@@ -19,14 +19,25 @@ import {
   estimateTuningCents,
   normalizeOnset,
 } from "../src/core/analysis/features";
-import { estimateTempo, relatedTempo, trackBeats } from "../src/core/analysis/tempo";
+import {
+  estimateTempo,
+  halfBeatStrength,
+  relatedTempo,
+  trackBeats,
+} from "../src/core/analysis/tempo";
 import { beatProfile, estimateMeter, subdivisionOf } from "../src/core/analysis/meter";
 import {
   aggregateChroma,
   estimateKeyFromChroma,
   keyName,
 } from "../src/core/analysis/key";
-import { accentPattern, analyzeAudio, confidenceTier } from "../src/core/analysis";
+import {
+  accentPattern,
+  analyzeAudio,
+  confidenceTier,
+  resolveDupleMeter,
+  type MeterEstimate,
+} from "../src/core/analysis";
 import { analyzeFile, downmix, resample } from "../src/platform/analyze";
 
 // --- 신호 합성 -------------------------------------------------------------------
@@ -75,11 +86,18 @@ interface TrackOptions {
   /** 박 사이에 넣을 8분음표. "straight" | "swing" | null */
   eighths?: "straight" | "swing" | null;
   cents?: number;
+  /**
+   * 박마다의 세기. 기본은 `[1, 0.45, 0.45, 0.45]`.
+   *
+   * **3박째를 세게 주면 절반 템포 오류가 재현된다** — 세기가 두 박 주기로
+   * 오르내리면 자기상관이 그 주기를 비트로 읽는다.
+   */
+  beatGains?: readonly number[];
 }
 
 /** 클릭 트랙 + 화음. 답을 아는 신호. */
 function makeTrack(options: TrackOptions): Float32Array {
-  const { bpm, bars, beatsPerBar, chords, eighths = null, cents = 0 } = options;
+  const { bpm, bars, beatsPerBar, chords, eighths = null, cents = 0, beatGains } = options;
   const beat = 60 / bpm;
   const total = bars * beatsPerBar * beat + 1;
   const out = new Float32Array(Math.round(total * ANALYSIS_RATE));
@@ -89,7 +107,7 @@ function makeTrack(options: TrackOptions): Float32Array {
     for (let b = 0; b < beatsPerBar; b += 1) {
       const at = (bar * beatsPerBar + b) * beat;
       // 마디 첫 박을 세게 — 다운비트 단서
-      click(out, at, b === 0 ? 1.0 : 0.45, rng);
+      click(out, at, beatGains?.[b] ?? (b === 0 ? 1.0 : 0.45), rng);
       if (eighths) {
         const offset = eighths === "swing" ? (2 / 3) * beat : 0.5 * beat;
         click(out, at + offset, 0.3, rng);
@@ -239,6 +257,59 @@ describe("템포와 비트", () => {
     expect(tempo.bpm === 0 || tempo.confidence < 0.5).toBe(true);
   });
 
+  /**
+   * **빠른 곡을 절반으로 읽던 버그의 회귀 시험** (실측 2026-08-11).
+   *
+   * 173BPM 4/4 실곡이 87BPM 3/4로 나왔다. 세기가 두 박 주기로 오르내리면
+   * 자기상관이 그 주기를 비트로 읽고, prior도 120에 가까운 절반 쪽을 든다
+   * (86.5는 −0.47옥타브, 173은 +0.53옥타브라 거의 대칭이지만 절반이 조금 가깝다).
+   * 정답 악보의 온셋만 넣어도 똑같이 틀렸으므로 오디오 문제가 아니었다.
+   */
+  test("빠른 곡을 절반 템포로 읽지 않는다", () => {
+    // 3박째에 악센트 — 두 박 주기가 생겨 절반으로 읽히던 패턴
+    const samples = makeTrack({
+      bpm: 174,
+      bars: 24,
+      beatsPerBar: 4,
+      beatGains: [1.0, 0.45, 0.7, 0.45],
+    });
+    const report = analyzeAudio(samples, ANALYSIS_RATE);
+    expect(report.tempo.bpm).toBeGreaterThan(160);
+    expect(report.tempo.bpm).toBeCloseTo(174, -1);
+    // 템포가 맞아야 박자도 맞는다 — 절반이면 진짜 마디가 2박이 되어 버린다
+    expect(report.meter.beatsPerBar).toBe(4);
+  });
+
+  test("근거가 없으면 배수를 올리지 않는다", () => {
+    // 이미 제대로 잡힌 곡을 건드리면 안 된다
+    for (const bpm of [120, 90, 174]) {
+      const samples = makeTrack({ bpm, bars: 20, beatsPerBar: 4 });
+      expect(analyzeAudio(samples, ANALYSIS_RATE).tempo.bpm).toBeCloseTo(bpm, -1);
+    }
+  });
+
+  test("반박 세기 — 반박이 비었으면 0에 가깝다", () => {
+    const samples = makeTrack({ bpm: 120, bars: 12, beatsPerBar: 4 });
+    const features = extractFeatures(samples, ANALYSIS_RATE);
+    const onset = normalizeOnset(features.onset, features.fps);
+    const track = trackBeats(onset, features.fps, 120);
+    expect(halfBeatStrength(onset, features.fps, track.beats)).toBeLessThan(0.2);
+    // 비트가 두어 개뿐이면 잴 것이 없다
+    expect(halfBeatStrength(onset, features.fps, [0, 0.5])).toBe(0);
+  });
+
+  test("템포 후보의 확률을 다 더하면 1이다", () => {
+    const { tempo } = tempoOf(120);
+    const sum = tempo.candidates.reduce((acc, c) => acc + c.probability, 0);
+    expect(sum).toBeCloseTo(1, 5);
+    // 내림차순이다
+    for (let i = 1; i < tempo.candidates.length; i += 1) {
+      expect(tempo.candidates[i].probability).toBeLessThanOrEqual(
+        tempo.candidates[i - 1].probability,
+      );
+    }
+  });
+
   test("정수배·3:2 관계를 알아본다 — 같은 그리드의 다른 읽기다", () => {
     expect(relatedTempo(120, 60)).toBe(true);
     expect(relatedTempo(120, 240)).toBe(true);
@@ -326,6 +397,89 @@ describe("박자 — 축 B (마디당 박)", () => {
     );
     expect(meter.beatsPerBar).toBe(4);
     expect(meter.confidence).toBe(0);
+  });
+
+  /**
+   * 2박은 **배수 오류의 신호**라서 후보에 있다. 절반 템포로 잡히면 진짜 마디가
+   * 우리 박으로 2박이 되는데, 후보에 2가 없으면 3이나 4가 억지로 뽑혀 나가
+   * 원인이 가려진다(실측: 173BPM 4/4 곡이 87BPM 3/4로 나갔다).
+   */
+  test("후보가 2·3·4 셋이고 확률을 다 더하면 1이다", () => {
+    const meter = meterOf(4);
+    expect(meter.candidates.map((c) => c.beatsPerBar).sort()).toEqual([2, 3, 4]);
+    const sum = meter.candidates.reduce((acc, c) => acc + c.probability, 0);
+    expect(sum).toBeCloseTo(1, 5);
+    // 고른 것이 1등이다 — 확률은 마진까지 반영한 값이라 결정과 어긋나지 않는다
+    expect(meter.candidates[0].beatsPerBar).toBe(meter.beatsPerBar);
+  });
+
+  test("2박을 후보에 넣어도 4/4를 빼앗기지 않는다", () => {
+    for (const bpm of [100, 120, 140]) {
+      expect(meterOf(4, bpm).beatsPerBar).toBe(4);
+    }
+  });
+
+  /**
+   * **4/4가 기본값이다** — 근소하게 앞선다고 넘어가면 안 된다(실측: 실곡에서
+   * 1%p 차이로 2/4가 나가 격자·마디·악보가 통째로 어긋났다).
+   */
+  test("3박째가 첫 박만큼 세도 4/4를 지킨다", () => {
+    // 세기만 보면 2박 주기다. 화성이 4박마다 바뀌는 것이 4/4를 지탱한다
+    const samples = makeTrack({
+      bpm: 120,
+      bars: 16,
+      beatsPerBar: 4,
+      chords: C_MAJOR_PROGRESSION,
+      beatGains: [1.0, 0.4, 1.0, 0.4],
+    });
+    const features = extractFeatures(samples, ANALYSIS_RATE);
+    const onset = normalizeOnset(features.onset, features.fps);
+    const track = trackBeats(onset, features.fps, 120);
+    const meter = estimateMeter(
+      track.beats,
+      features.fps,
+      features.onset,
+      features.low,
+      features.chroma,
+    );
+    expect(meter.beatsPerBar).toBe(4);
+  });
+
+  /**
+   * 주기가 뚜렷하면 그대로 읽는다. **2박을 문턱으로 막지 않는다** —
+   * 막아 봤더니 진짜 2/4 동요까지 4/4가 됐고, 2/4가 나오는 것 자체가
+   * 배수 오류를 알려주는 값진 신호였다(`resolveDupleMeter`).
+   */
+  test("순수 주기 신호를 그대로 읽는다 (2·3·4)", () => {
+    const fps = 100;
+    const beats = Array.from({ length: 48 }, (_, i) => i * 0.5);
+    const frames = 48 * 50 + 50;
+    const pulse = (period: number) => {
+      const onset = new Float32Array(frames);
+      for (const [i, beat] of beats.entries()) {
+        const at = Math.round(beat * fps);
+        for (let k = 0; k < 6; k += 1) onset[at + k] = i % period === 0 ? 1 : 0.2;
+      }
+      return estimateMeter(
+        beats,
+        fps,
+        onset,
+        new Float32Array(frames),
+        new Float32Array(frames * 12).fill(1 / 12),
+      );
+    };
+    for (const period of [2, 3, 4]) {
+      expect(pulse(period).beatsPerBar).toBe(period);
+    }
+  });
+
+  /**
+   * 2/4와 4/4는 같은 그리드를 다른 단위로 읽은 것이다 — 템포에서 ×2가 신뢰도를
+   * 깎지 않는 것과 같다. 이걸 빼먹으면 후보에 2를 넣은 것만으로 신뢰도가
+   * 절반이 된다(실측: 0.48 → 0.26).
+   */
+  test("배수 관계인 2박은 4/4의 신뢰도를 깎지 않는다", () => {
+    expect(meterOf(4).confidence).toBeGreaterThan(0.35);
   });
 });
 
@@ -587,5 +741,87 @@ describe("디코딩 보조", () => {
       getChannelData: (c: number) => (c === 0 ? left : right),
     } as unknown as AudioBuffer;
     expect([...downmix(buffer)]).toEqual([0.5, 0.5, 0.5]);
+  });
+});
+
+// --- 2/4 → 배수 오류 ------------------------------------------------------------
+
+/**
+ * **2/4는 박자에 대한 답이라기보다 "비트가 두 배 길다"는 신고다.**
+ *
+ * 대중음악에서 2/4는 드물고, 반대로 템포가 절반으로 잡히면 진짜 4/4 마디가 우리
+ * 박으로 정확히 2박이 되어 축 B가 2를 고른다. `resolveOctave`가 악센트로 먼저
+ * 같은 것을 잡지만 반박이 뚜렷해야만 걸리므로, 그것이 놓친 경우를 여기서 받는다.
+ *
+ * (2박 자체를 마진으로 막아 보기도 했는데, **진짜 2/4 동요까지 4/4가 되어**
+ * 되돌렸다 — 2/4가 나오는 것 자체가 값진 신호라 지우면 안 된다.)
+ */
+describe("2/4가 나오면 템포 절반을 의심한다", () => {
+  const onset = new Float32Array(2000).fill(1);
+  const beats = Array.from({ length: 40 }, (_, i) => i * 0.5);
+  const meterOfBar = (beatsPerBar: number): MeterEstimate => ({
+    value: `${beatsPerBar}/4`,
+    beatsPerBar,
+    phase: 0,
+    subdivision: "simple",
+    shuffle: false,
+    confidence: 0.5,
+    candidates: [],
+    downbeats: [],
+  });
+  const track = { beats, bpm: 60, steadiness: 1 };
+  const tempoWith = (bpm: number, weight: number) => ({
+    bpm: 60,
+    confidence: 0.5,
+    candidates: [
+      { bpm: 60, weight: 1, probability: 0.6 },
+      { bpm, weight, probability: 0.4 },
+    ],
+  });
+  /** 두 배로 다시 재면 4/4가 나오는 상황 */
+  const solves = () => meterOfBar(4);
+
+  test("2배 후보가 있고 다시 재서 4/4가 나오면 갈아탄다", () => {
+    const out = resolveDupleMeter(
+      onset, 100, tempoWith(120, 0.5), track, meterOfBar(2), solves,
+    );
+    expect(out).not.toBeNull();
+    expect(out?.meter.beatsPerBar).toBe(4);
+    expect(out?.track.bpm).toBeCloseTo(120, 0);
+  });
+
+  test("박자가 2/4가 아니면 건드리지 않는다", () => {
+    for (const bar of [3, 4]) {
+      expect(
+        resolveDupleMeter(onset, 100, tempoWith(120, 0.5), track, meterOfBar(bar), solves),
+      ).toBeNull();
+    }
+  });
+
+  test("자기상관에 2배 후보가 없으면 올리지 않는다", () => {
+    // 2배가 아닌 자리에 있는 후보
+    expect(
+      resolveDupleMeter(onset, 100, tempoWith(95, 0.9), track, meterOfBar(2), solves),
+    ).toBeNull();
+    // 2배 자리이긴 한데 너무 약하다
+    expect(
+      resolveDupleMeter(onset, 100, tempoWith(120, 0.05), track, meterOfBar(2), solves),
+    ).toBeNull();
+  });
+
+  test("두 배로 재도 4/4가 안 나오면 원래 답을 지킨다", () => {
+    // 근거 없이 숫자만 두 배로 만들면 2/4가 알려주던 사실까지 지워진다
+    expect(
+      resolveDupleMeter(
+        onset, 100, tempoWith(120, 0.5), track, meterOfBar(2), () => meterOfBar(2),
+      ),
+    ).toBeNull();
+  });
+
+  test("2배가 상한을 넘으면 올리지 않는다", () => {
+    const fast = { beats, bpm: 150, steadiness: 1 };
+    expect(
+      resolveDupleMeter(onset, 100, tempoWith(300, 0.9), fast, meterOfBar(2), solves),
+    ).toBeNull();
   });
 });

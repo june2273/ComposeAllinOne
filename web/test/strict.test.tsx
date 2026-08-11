@@ -8,7 +8,7 @@ import { act, render } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import { NullSynth } from "../src/core/audio";
-import { DIATONIC_INTERVALS } from "../src/core/config";
+import { DIATONIC_INTERVALS, INTERVAL_HALF_STEPS } from "../src/core/config";
 import { QuizPage } from "../src/ui/pages";
 
 vi.mock("../src/core/score", () => ({
@@ -22,21 +22,46 @@ const press = (key: string) =>
     window.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
   });
 
-test("StrictMode에서 두 자리 반음 입력이 정확하다", async () => {
+test("StrictMode에서 숫자가 두 번 반영되지 않는다 (연습 1)", async () => {
   render(
     <StrictMode>
-      <QuizPage config={DIATONIC_INTERVALS} audio={new NullSynth()} onFinished={() => {}} />
+      <QuizPage config={INTERVAL_HALF_STEPS} audio={new NullSynth()} onFinished={() => {}} />
     </StrictMode>,
   );
   await act(async () => {
     vi.advanceTimersByTime(250);
   });
-  press("3");
-  press("1");
-  press("2");
+  press("6"); // 도수
+  press("1"); // 반음 개수
   const shown = [...document.querySelectorAll(".field")].map((f) => f.textContent);
   console.log("  화면에 보이는 값:", shown);
-  expect(shown).toEqual(["3", "12"]);
+  expect(shown).toEqual(["6", "1"]);
+});
+
+test("StrictMode에서 제출이 두 번 나가지 않는다 (본 단계)", async () => {
+  const finished: unknown[][] = [];
+  render(
+    <StrictMode>
+      <QuizPage
+        config={{ ...DIATONIC_INTERVALS, questionCount: 2 }}
+        audio={new NullSynth()}
+        onFinished={(r) => finished.push(r)}
+      />
+    </StrictMode>,
+  );
+  // 도수와 성질이 다 차는 순간 제출된다. 업데이터 안에서 불렀다면 두 번 나간다.
+  for (let i = 0; i < 2; i += 1) {
+    await act(async () => {
+      vi.advanceTimersByTime(250);
+    });
+    press("3");
+    press("M");
+    await act(async () => {
+      vi.advanceTimersByTime(2400);
+    });
+  }
+  expect(finished).toHaveLength(1);
+  expect(finished[0]).toHaveLength(2); // 4개가 되면 두 번 제출된 것이다
 });
 
 test("StrictMode에서도 문제 수와 채점이 어긋나지 않는다", async () => {

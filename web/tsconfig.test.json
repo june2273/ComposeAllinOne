@@ -1,0 +1,13 @@
+{
+  /* 테스트도 타입 검사한다.
+     이 파일이 없던 동안 `tsc -b`가 src만 봐서, 테스트가 이미 사라진 필드를
+     계속 넘겨도(예: Question.keyContext) 아무도 잡지 못했다. vitest는
+     타입을 확인하지 않고 트랜스파일만 한다. */
+  "extends": "./tsconfig.app.json",
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.test.tsbuildinfo",
+    "types": ["vite/client", "vitest/globals"],
+    "composite": true
+  },
+  "include": ["test", "src"]
+}

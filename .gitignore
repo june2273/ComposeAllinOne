@@ -10,3 +10,8 @@ __pycache__/
 web/node_modules/
 web/dist/
 web/dist-ds/
+
+# 분석 사이드카. venv는 torch 때문에 수 GB고, cache/는 스템 WAV라 곡당 수십 MB다
+server/.venv/
+server/cache/
+.pytest_cache/

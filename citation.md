@@ -7,7 +7,7 @@
 라이선스 정보는 추측하지 않고 설치된 패키지 메타데이터와 배포처 원문에서 직접
 확인한 값이다. 확인 방법과 날짜는 각 항목의 "확인" 줄에 적었다.
 
-최종 갱신: 2026-08-03 (분석 콘솔 — BPM·박자·조성 알고리즘 출처 추가)
+최종 갱신: 2026-08-10 (리듬 양자화 — 메트리컬 DP 알고리즘 출처 추가)
 
 ---
 
@@ -96,8 +96,16 @@
 |---|---|---|---|---|
 | [numpy](https://numpy.org/) | 2.4.6 | BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 | Travis E. Oliphant 외 | `prepare_web_piano.py` — 모노 믹스, 페이드, 조율 측정용 FFT |
 | [soundfile](https://github.com/bastibe/python-soundfile) | 0.14.0 | BSD-3-Clause | Bastian Bechtold | `prepare_web_piano.py` — 원본 FLAC 디코딩, 중간 WAV 쓰기 |
+| [mido](https://github.com/mido/mido) | 1.3.3 | MIT | Ole Martin Bjørndalen | `eval_transcribe.py` — 정답 MIDI와 우리 MIDI를 읽어 대조 |
 
-라이선스는 설치된 배포판의 `importlib.metadata`에서 직접 읽었다. 확인일 2026-08-02.
+라이선스는 설치된 배포판의 `importlib.metadata`에서 직접 읽었다. 확인일 2026-08-02
+(mido는 2026-08-10 — `Classifier: License :: OSI Approved :: MIT License`와
+`dist-info/LICENSE` 원문을 함께 확인했다).
+
+> **mido는 한 번 빠졌다가 돌아왔다.** PySide6 앱에서 MIDI 입력용으로 쓰다가
+> 2026-08-03에 함께 지웠는데, 2026-08-10에 **평가 하니스**가 다시 들여왔다.
+> 용도가 다르다 — 실시간 입력이 아니라 파일 대조이고, `python-rtmidi`
+> (백엔드) 없이 순수 파서로만 쓴다. 앱 배포물에는 여전히 들어가지 않는다.
 
 > `soundfile`이 동봉한 **libsndfile(LGPL-2.1)**도 함께 빠졌다 — 빌드 타임에만
 > 쓰이고 배포물에 들어가지 않으므로 카피레프트 검토 대상이 아니다. 아래 4절의
@@ -188,6 +196,82 @@ verovio는 **웹 번들에 통째로 들어간다**(`dist/assets/verovio-module-
 
 ---
 
+## 2-2. 파이썬 — 분석 사이드카 (`server/`)
+
+**2026-08-09에 새로 들어왔다.** 스템 분리와 멜로디 f0는 학습된 모델이라 브라우저
+안에서 끝나지 않아, 로컬 FastAPI 서버 하나를 두고 거기서 돌린다. **앱의 배포물에는
+들어가지 않는다** — 사용자가 직접 띄우는 별도 프로세스이고, 꺼져 있으면 웹은 그
+칸만 잠근 채 그대로 동작한다.
+
+`server/.venv`는 위 2절의 `.venv`와 **별개다.** torch가 수 GB라 자산 파이프라인용
+환경을 오염시키지 않는다.
+
+라이선스는 설치된 배포판의 `importlib.metadata`(`License-Expression` 우선,
+없으면 `Classifier`)와 `dist-info/licenses/LICENSE` 원문에서 직접 읽었다.
+확인일: 2026-08-09.
+
+### 서버 뼈대
+
+| 패키지 | 버전 | 라이선스 | 저작자 | 활용처 |
+|---|---|---|---|---|
+| [fastapi](https://fastapi.tiangolo.com/) | 0.141.1 | MIT | Sebastián Ramírez | `server/app/main.py` — HTTP 라우팅 |
+| [starlette](https://www.starlette.io/) | 1.6.0 | BSD-3-Clause | Encode | fastapi가 끌고 온다. CORS·파일 응답 |
+| [pydantic](https://docs.pydantic.dev/) | 2.13.4 | MIT | Samuel Colvin 외 | fastapi가 끌고 온다 |
+| [uvicorn](https://www.uvicorn.org/) | 0.52.1 | BSD-3-Clause | Encode | ASGI 서버 |
+| [python-multipart](https://github.com/Kludex/python-multipart) | 0.0.32 | Apache-2.0 | Andrew Dunham 외 | `POST /jobs`의 파일 업로드 파싱. **없으면 500이 난다** |
+| [numpy](https://numpy.org/) | 2.4.6 | BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 | Travis E. Oliphant 외 | `app/audio.py` — 고역통과·게이트·정규화·리샘플 |
+| [soundfile](https://github.com/bastibe/python-soundfile) | 0.14.0 | BSD-3-Clause | Bastian Bechtold | 스템 WAV 읽기·쓰기 |
+| [pytest](https://pytest.org/) | 9.1.1 | MIT | Holger Krekel 외 | `server/test_sidecar.py` (개발 전용) |
+| [httpx](https://www.python-httpx.org/) | 0.28.1 | BSD-3-Clause | Encode | fastapi `TestClient`가 쓴다 (개발 전용) |
+
+### 모델
+
+| 패키지 | 버전 | 코드 라이선스 | 가중치 | 활용처 |
+|---|---|---|---|---|
+| [demucs](https://github.com/adefossez/demucs) | 4.1.0 | **MIT** (`dist-info/licenses/LICENSE` 원문 확인) | 아래 참조 | `app/stems.py` — htdemucs 4스템 분리 |
+| [basic-pitch](https://github.com/spotify/basic-pitch) | 0.4.0 | **Apache-2.0** (`dist-info/LICENSE` 원문: "Copyright 2022 Spotify AB" + Apache License 2.0 전문) | 패키지 동봉 | `app/melody.py` — 프레임별 피치 활성 → f0 커브 |
+| [torch](https://pytorch.org/) | 2.13.0 | Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND MIT | — | demucs가 쓴다. Apple Silicon에서 MPS 가속 |
+| [onnxruntime](https://onnxruntime.ai/) | 1.28.0 | MIT | — | basic-pitch의 ONNX 백엔드 |
+
+**basic-pitch의 메타데이터에는 라이선스 필드가 비어 있다.** `License-Expression`도
+`Classifier`도 없어서, 휠 안의 `basic_pitch-0.4.0.dist-info/LICENSE` 원문을 직접
+읽어 확인했다 — Apache License 2.0 전문이고 저작권자는 Spotify AB다. **메타데이터가
+비었다고 라이선스가 없는 것이 아니므로 추측하지 말고 늘 원문을 볼 것.**
+
+**모델 가중치**
+
+- **htdemucs**: 코드가 아니라 HuggingFace(`adefossez/HTDemucs`)에서 **실행 시점에
+  내려받는다** — `~/.cache/huggingface/hub/models--adefossez--HTDemucs/`. demucs
+  저장소의 README는 코드에 대해 MIT를 명시하지만 **가중치 파일 자체의 라이선스는
+  별도로 확인하지 않았다.** 개인 사용에는 문제가 없고, 배포·수익화 시점에 반드시
+  원문을 확인할 것(사양서 §10의 같은 경고).
+- **basic-pitch**: `basic_pitch/saved_models/icassp_2022/`에 `nmp.onnx`·`nmp.tflite`·
+  `nmp.mlpackage`가 **패키지에 동봉**되어 온다. 패키지 전체가 Apache-2.0이므로
+  가중치도 그 아래에 있다고 본다.
+
+### 딸려 오는 것 중 주의할 것
+
+| 패키지 | 버전 | 라이선스 | 메모 |
+|---|---|---|---|
+| [lameenc](https://github.com/chrisstaite/lameenc) | 1.8.4 | **LGPL-3.0-or-later** | demucs가 MP3로 내보낼 때만 쓴다. **우리는 WAV만 쓰므로 부르지 않는다.** 배포 형태를 정할 때 이 의존성을 뺄 수 있는지 볼 것 |
+| [librosa](https://librosa.org/) | 0.11.0 | ISC | basic-pitch가 끌고 온다. 우리 코드는 직접 부르지 않는다 |
+| [resampy](https://github.com/bmcfee/resampy) | 0.4.2 | ISC | librosa가 끌고 온다. **`pkg_resources`를 import하므로 `setuptools<81`이 필요하다**(아래) |
+| [scipy](https://scipy.org/) | 1.17.1 | BSD-3-Clause | librosa가 끌고 온다 |
+| [julius](https://github.com/adefossez/julius) | 0.2.8 | MIT | demucs의 리샘플러 |
+| [einops](https://github.com/arogozhnikov/einops) | 0.8.2 | MIT | demucs |
+| [pretty_midi](https://github.com/craffel/pretty-midi) | 0.2.11 | MIT | basic-pitch의 MIDI 출력. **우리는 쓰지 않는다** — MIDI는 `web/src/core/transcribe/midi.ts`가 직접 쓴다 |
+| [setuptools](https://setuptools.pypa.io/) | <81 (고정) | MIT | 버전 제약이 있다. 81에서 `pkg_resources`가 제거됐는데 resampy가 아직 그것을 import한다 |
+
+### 환경 제약 (실측 2026-08-09)
+
+- **Python 3.11이 필요하다.** 3.14에서는 `basic-pitch`가 낡은 `numpy`를 소스
+  빌드하려다 실패한다(`pkgutil.ImpImporter` 제거 때문). ML 생태계가 파이썬
+  릴리스를 따라오는 데 시간이 걸리므로 3.11로 고정한다.
+- **`setuptools<81`.** 82에서 `pkg_resources`가 사라졌고 `resampy`가 그것을
+  import한다. 최신 setuptools를 쓰면 f0 추출이 `ModuleNotFoundError`로 죽는다.
+
+---
+
 ## 3. 참고한 문서·웹 자료
 
 코드나 데이터를 가져오지 않았고, 사실 확인·의사결정 근거로만 참조한 것들이다.
@@ -204,9 +288,10 @@ verovio는 **웹 번들에 통째로 들어간다**(`dist/assets/verovio-module-
 
 ---
 
-## 3-1. 오디오 분석 알고리즘 (논문·강의 — 코드 미사용)
+## 3-1. 오디오 분석·전사 알고리즘 (논문·강의 — 코드 미사용)
 
-`web/src/core/analysis/`(BPM·박자·조성)는 **라이브러리를 하나도 쓰지 않는다.**
+`web/src/core/analysis/`(BPM·박자·조성)와 `web/src/core/transcribe/`(음표·양자화·
+악보)는 **라이브러리를 하나도 쓰지 않는다.**
 FFT까지 직접 짰다. 따라서 여기에 걸리는 라이선스는 없지만, **알고리즘의
 출처는 남긴다** — 이 프로젝트의 기록 규칙이 "코드 조각"까지 포함하기 때문이고,
 나중에 파라미터를 다시 맞출 때 원문을 찾아가야 하기 때문이다.
@@ -222,6 +307,32 @@ FFT까지 직접 짰다. 따라서 여기에 걸리는 라이선스는 없지만
 | Krumhansl–Schmuckler 조성 판정 (크로마 × 프로파일 상관) | Krumhansl, *Cognitive Foundations of Musical Pitch*, 1990 (프로파일은 Krumhansl & Kessler 1982) | `analysis/key.ts` |
 | Temperley 조성 프로파일 | Temperley, *The Cognition of Basic Musical Structures*, MIT Press 2001 (Kostka-Payne 코퍼스 기반) | `analysis/key.ts` `TEMPERLEY` |
 | 크로마 = 옥타브 등가성으로 접기 | 강의 03(음악 정보학) · Bartsch & Wakefield, WASPAA 2001 | `analysis/features.ts` |
+
+**리듬 양자화**(2026-08-10 추가). 실곡에서 `점8분쉼표 + 16분음표`가 남발되는
+증상을 고치며 문헌을 확인했다. 최근접 반올림이 실패하는 것은 알려진 문제이고,
+해법의 계보는 아래와 같다. **아이디어(비용의 구성)만 가져왔고 수식·코드·파라미터는
+옮기지 않았다** — 아래 구현의 상수는 전부 직접 정한 값이다.
+
+| 알고리즘 | 출처 | 우리 코드 |
+|---|---|---|
+| 리듬 전사를 HMM/Viterbi로 (타이밍 편차 모델 × 음가 문법) — 최초 | Takeda, Nishimoto, Sagayama, "Rhythm and Tempo Analysis Toward Automatic Music Transcription", ICASSP 2007 / Takeda et al., "Hidden Markov Model for Automatic Transcription of MIDI Signals", MMSP 2002 | `transcribe/quantize.ts` `viterbiOnsets` |
+| **메트리컬 HMM** — 박절 위치를 상태 사전확률로 두어 문법적으로 불가능한 표기를 피한다 | Nakamura, Yoshii, Sagayama, "Rhythm Transcription of Polyphonic Piano Music Based on Merged-Output HMM for Multiple Voices", IEEE/ACM TASLP 25(4), 2017 — [arXiv 1701.08343](https://arxiv.org/abs/1701.08343) | `transcribe/quantize.ts` `metricalCost` |
+| **음가 인식을 온셋 양자화와 분리** — 음가는 발성 길이가 아니라 IOI에서 얻는다 | 위 Nakamura 2017의 note value recognition 단계 | `transcribe/quantize.ts` `withDurations` |
+| 강한 박절 위치에 음표가 몰린다는 관찰(박절 가중치의 근거) | Povel & Essens, "Perception of Temporal Patterns", Music Perception 2(4), 1985 | `transcribe/quantize.ts` `metricalCost` |
+| 비트·다운비트를 선지식으로 주고 양자화 — 구조의 타당성 확인 | Liu, Kong, Benetos et al., "Performance MIDI-to-Score Conversion by Neural Beat Tracking", ISMIR 2022 · "Beat-Based Rhythm Quantization of MIDI Performances", [arXiv 2508.19262](https://arxiv.org/abs/2508.19262) | (구조만 참고) |
+| "f0 추정 → 타텀 반올림" 캐스케이드가 노래에서 실패하는 이유 | Nishikimi, Nakamura, Yoshii et al., "Audio-to-score singing transcription based on a CRNN-HSMM hybrid model", APSIPA Trans. 2021 | (문제 진단) |
+| 가수의 타이밍 편차는 표현이자 습관 — 악보 시작 ≠ 발성 시작 | Hono et al., "Singing Voice Synthesis Based on Frame-Level Sequence-to-Sequence Models Considering Vocal Timing Deviation", [arXiv 2301.02262](https://arxiv.org/abs/2301.02262) | `transcribe/quantize.ts` `estimateOffsetMs` |
+| **클록 드리프트** — 밀린 양이 곡 안에서 변한다. 양자화와 템포/오프셋 곡선을 함께 푼다 | Cemgil & Kappen, "Monte Carlo Methods for Tempo Tracking and Rhythm Quantization", *JAIR* 18, 2003 — [doi:10.1613/jair.1121](https://doi.org/10.1613/jair.1121) · 위 Nakamura 2017도 드리프트 변수를 둔다 | `transcribe/quantize.ts` `estimateOffsetCurve` (2026-08-10 추가) |
+
+**드리프트는 2026-08-10에 실측으로 필요성이 확인되고 추가됐다** — 정답 MIDI가
+있는 실곡에서 밀린 양이 −56~+60ms를 오갔다(16분 한 칸이 108ms). Cemgil은
+Monte Carlo로 풀지만 우리는 **표본 잘라내기 + 슬라이딩 중앙값 + 기울기 제한**의
+강건 필터로 대신했다. 구조(시변 오프셋을 상태로 둔다)만 같고 추론 방법은 다르다.
+
+**신경망 계열(PM2S·T5 양자화)은 채택하지 않았다.** 학습 데이터와 런타임이 필요한데
+이 저장소는 순수 TypeScript에 의존성이 없다. 같은 구조를 **학습 없이** 세울 수 있어서
+비용 항만 직접 설계했다 — 대신 정확도는 그만큼 못 미치고, 상수들은 평가셋이 생겨야
+근거를 갖는다.
 
 **프로파일 숫자 24개는 논문에서 그대로 가져온 값이다.** 알고리즘 서술과 달리
 이것은 데이터라 따로 적어 둔다 — 실험으로 얻은 수치이고, MIR 도구(librosa·

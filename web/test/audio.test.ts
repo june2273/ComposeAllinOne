@@ -1,7 +1,8 @@
 /** 오디오 백엔드 — 브라우저 없이 검증할 수 있는 부분. */
 import { describe, expect, test, vi } from "vitest";
 
-import { NullSynth, SineSynth, midiToFreq } from "../src/core/audio";
+import { NullSynth, midiToFreq } from "../src/core/audio";
+import { SineSynth } from "../src/platform/synth";
 
 describe("주파수", () => {
   test("A4 = 440Hz, C4 ≈ 261.63Hz", () => {

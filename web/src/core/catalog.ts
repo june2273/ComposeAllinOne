@@ -20,7 +20,13 @@
  * 태우려 하지 말 것 — 문제 큐·제한시간·정답 판정이 전부 맞지 않는다.
  */
 
-import { DIATONIC_INTERVALS, INTERMEDIATE, type SessionConfig } from "./config";
+import {
+  DIATONIC_INTERVALS,
+  INTERMEDIATE,
+  INTERVAL_HALF_STEPS,
+  INTERVAL_TABLE,
+  type SessionConfig,
+} from "./config";
 
 export const Domain = {
   Ear: "청음",
@@ -139,15 +145,50 @@ const EAR: Activity[] = [
 
 // --- 화성학 -----------------------------------------------------------------
 
+// 온음정은 **연습 둘 + 본 하나**로 쪼개져 있다. 앞의 둘은 본 단계에서 하는 일을
+// 반으로 나눈 것이라 순서대로 두었다 — 목록의 위아래가 곧 학습 순서다.
 const HARMONY: Activity[] = [
+  {
+    id: "harmony.interval_halfsteps",
+    domain: Domain.Harmony,
+    kind: Kind.Quiz,
+    title: "반음 계산법 (연습)",
+    summary: "두 음이 몇 도이고 반음이 몇 개인지 센다. 성질은 묻지 않는다.",
+    status: Status.Ready,
+    config: INTERVAL_HALF_STEPS,
+    features: [
+      "악보와 소리로 두 음을 준다",
+      "도수와 반음 개수를 숫자 키로 입력하고 Enter",
+      "여기서 '반음'은 미–파·시–도 자리의 개수다 (반음계적 거리가 아니다)",
+    ],
+  },
+  {
+    id: "harmony.interval_table",
+    domain: Domain.Harmony,
+    kind: Kind.Quiz,
+    title: "음정표 외우기 (연습)",
+    summary: "도수와 반음 개수를 주면 성질을 고른다. 계산은 빼고 표만.",
+    status: Status.Ready,
+    config: INTERVAL_TABLE,
+    features: [
+      "악보·소리와 함께 'n도 · 반음 m개'를 알려준다",
+      "완전·장·단·증·감을 버튼으로 고른다",
+      "옵션의 '표 보기'를 켜면 음정표를 보면서 풀 수 있다",
+    ],
+  },
   {
     id: "harmony.interval_diatonic",
     domain: Domain.Harmony,
     kind: Kind.Quiz,
     title: "온음정",
-    summary: "한 조의 음계음으로 만든 음정. 도수·반음 수·성질.",
+    summary: "두 음만 보고 성질과 도수를 답한다. 앞의 두 연습을 합친 본 단계.",
     status: Status.Ready,
     config: DIATONIC_INTERVALS,
+    features: [
+      "성질은 버튼, 도수는 숫자 키 — 둘이 다 차면 제출된다",
+      "반음 개수는 입력하지 않는다. 머릿속에서 센다",
+      "틀리면 반음이 몇 개였는지 알려준다 — 어느 연습으로 돌아갈지 보이도록",
+    ],
   },
   {
     id: "harmony.interval_chromatic",
@@ -276,17 +317,20 @@ const ANALYSIS: Activity[] = [
       "BPM 검출 — 템포와 박 위치 (동작)",
       "박자 검출 — 3/4·4/4와 셔플 (동작)",
       "키 검출 — 전역 조성 (동작)",
-      "스템 분리 — 보컬·드럼·베이스·기타",
+      "스템 분리 — 보컬·드럼·베이스·그 외 (동작 · 사이드카)",
+      "피치 커브 — 보컬 음정 궤적 (동작 · 사이드카)",
+      "MIDI 변환 — 노래한 그대로 / 격자에 얹은 것 두 벌 (동작)",
+      "악보 변환 — 멜로디 오선보 (동작 · score.ts 재사용)",
       "코드 진행 — 비트 동기 크로마 위에서",
-      "MIDI 변환 — 오디오에서 음표 추출",
-      "악보 변환 — MIDI에서 오선보 (score.ts 재사용)",
-      "피치 커브 — 보컬 음정 궤적",
+      "구조 분석 — 섹션 경계. 변박·전조·변속이 전부 여기 걸려 있다",
     ],
     requires: [
       "연습 세션이 아니다 — 점수·제한시간·문제가 없다. Session을 쓰지 않는다",
       "BPM·박자·조성은 순수 DSP라 브라우저에서 끝난다(core/analysis). 워커에서 돌린다",
+      "스템 분리·멜로디는 학습된 모델이라 브라우저 밖이다 — 로컬 Python 사이드카(server/). 꺼져 있으면 그 칸만 잠기고 나머지는 그대로 뜬다",
+      "사이드카 실행: cd server && .venv/bin/uvicorn app.main:app --port 8420",
+      "노트 분할·양자화·MIDI·악보는 순수 로직이라 웹에 있다(core/transcribe). 모델을 갈아끼워도 여기는 안 바뀐다",
       "변박·전조·변속은 '구간을 어떻게 나누는가'의 문제다 — 구조 분석이 먼저 필요하다",
-      "스템 분리·코드 인식·멜로디는 무거운 모델이 필요하다. Tauri의 Rust 쪽이나 Python 사이드카로 내보낼 것. 수 분이 걸리므로 진행률과 취소가 필요하다",
       "도입하는 라이브러리·모델은 전부 citation.md에 기록 — 이 분야는 라이선스가 제각각이고 학습 데이터 출처가 불투명한 모델이 섞여 있다",
     ],
   },

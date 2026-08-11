@@ -42,6 +42,14 @@ export interface TempoCandidate {
   readonly bpm: number;
   /** prior까지 곱한 점수. 최고 후보가 1이 되도록 정규화된 값 */
   readonly weight: number;
+  /**
+   * 후보들 사이의 몫으로 본 비율 0~1. 다 더하면 1이다.
+   *
+   * **확률이라고 부르지만 교정된 확률은 아니다** — 자기상관 점수를 정규화한
+   * 값일 뿐이다. 그래도 "86과 172가 백중세였다" 같은 사실을 한눈에 보여주는
+   * 데는 이만한 것이 없어서 화면에 낸다.
+   */
+  readonly probability: number;
 }
 
 export interface TempoEstimate {
@@ -99,15 +107,19 @@ export function estimateTempo(onset: Float32Array, fps: number): TempoEstimate {
     if (score[lag] <= score[lag - 1] || score[lag] < score[lag + 1]) continue;
     const denom = score[lag - 1] - 2 * score[lag] + score[lag + 1];
     const delta = denom === 0 ? 0 : (0.5 * (score[lag - 1] - score[lag + 1])) / denom;
-    peaks.push({ bpm: (60 * fps) / (lag + delta), weight: score[lag] });
+    peaks.push({ bpm: (60 * fps) / (lag + delta), weight: score[lag], probability: 0 });
   }
   if (!peaks.length) return { bpm: 0, confidence: 0, candidates: [] };
 
   peaks.sort((a, b) => b.weight - a.weight);
   const top = peaks[0];
-  const normalized = peaks
-    .slice(0, 5)
-    .map((p) => ({ bpm: p.bpm, weight: p.weight / top.weight }));
+  const shown = peaks.slice(0, 5);
+  const total = shown.reduce((sum, p) => sum + p.weight, 0);
+  const normalized = shown.map((p) => ({
+    bpm: p.bpm,
+    weight: p.weight / top.weight,
+    probability: total > 0 ? p.weight / total : 0,
+  }));
 
   // 신뢰도 = 정수배로 설명되지 않는 경쟁자가 얼마나 약한가.
   // ×2·÷2는 같은 비트 그리드의 다른 읽기이므로 신뢰도를 깎지 않는다.
@@ -192,6 +204,88 @@ export function trackBeats(
   const steady = gaps.filter((g) => Math.abs(g / median - 1) < 0.05).length / gaps.length;
 
   return { beats, bpm: 60 / refinePeriod(beats, gaps, median), steadiness: steady };
+}
+
+// --- 배수 모호성 해소 ----------------------------------------------------------
+//
+// 아래 상수 셋은 **실곡 하나(173BPM J-pop)에서 잰 값이다.** 평가셋이 커지면
+// 다시 맞출 자리다 — `meter.ts`의 임계값들과 같은 처지다.
+
+/** 2배 후보가 최고 후보의 이 비율은 되어야 배수 다툼으로 본다 */
+const OCTAVE_RIVAL = 0.7;
+/** 반박 자리가 비트 자리의 이 비율을 넘으면 "반박도 비트"로 의심한다 */
+const HALF_BEAT_STRONG = 0.4;
+/** 2배로 갈아탄 뒤 반박 대비가 이 배수 이하로 좋아져야 실제로 갈아탄다 */
+const OCTAVE_IMPROVE = 0.75;
+
+/**
+ * 비트 자리 대비 **반박 자리**의 온셋 세기. 1에 가까우면 반박도 비트다.
+ *
+ * 배수 오류를 잡는 직접 증거다. 자기상관은 정수배 지연에서 함께 피크가 서기
+ * 때문에 원리적으로 배수를 가릴 수 없지만(파일 첫 주석), **악센트 구조는 가린다** —
+ * 진짜 비트 자리가 반박 자리보다 세다.
+ */
+export function halfBeatStrength(
+  onset: Float32Array,
+  fps: number,
+  beats: readonly number[],
+): number {
+  if (beats.length < 3) return 0;
+  const at = (t: number): number => {
+    const i = Math.round(t * fps);
+    return i >= 0 && i < onset.length ? onset[i] : 0;
+  };
+  let onBeat = 0;
+  let offBeat = 0;
+  for (let i = 0; i < beats.length - 1; i += 1) {
+    onBeat += at(beats[i]);
+    offBeat += at((beats[i] + beats[i + 1]) / 2);
+  }
+  return onBeat > 0 ? offBeat / onBeat : 0;
+}
+
+/**
+ * 절반 템포로 잡힌 것을 바로잡는다. 갈아탈 이유가 없으면 `null`.
+ *
+ * ## 왜 필요한가 (실측 2026-08-11)
+ *
+ * 173BPM 4/4 곡이 **87BPM 3/4**로 나왔다. 정답 악보의 온셋만 넣어도 똑같이
+ * 틀리므로 오디오 문제가 아니라 알고리즘 문제다. 절반 쪽이 이긴 마진이 7%뿐인데
+ * 그중 prior 기여는 2.3%였다 — **prior를 손봐도 안 고쳐진다**(86.5는 120에서
+ * −0.47옥타브, 173은 +0.53옥타브라 거의 대칭이다). 남은 4.7%는 자기상관 자체가
+ * 2박 주기를 좋아해서 생긴 것이고, 그건 자기상관으로는 풀 수 없다.
+ *
+ * ## 어떻게 가르는가
+ *
+ * **갈아타서 실제로 좋아지는지를 본다.** 반박 자리가 세다는 것만으로는 부족하다 —
+ * 8분음표를 고르게 치는 곡은 진짜 템포에서도 반박이 세고, 그런 곡을 2배로 올리면
+ * 그냥 틀린다. 그래서 2배 그리드에서 **대비가 실제로 뚜렷해질 때만** 갈아탄다.
+ * 온셋이 완전히 고른 신호에서는 비율이 그대로라 이 조건이 막아 준다.
+ *
+ * 실측(이 곡): 느린 그리드 0.530 → 빠른 그리드 0.221. 87.1 → 173.0.
+ */
+export function resolveOctave(
+  onset: Float32Array,
+  fps: number,
+  tempo: TempoEstimate,
+  track: BeatTrack,
+): BeatTrack | null {
+  if (track.beats.length < 8 || track.bpm <= 0) return null;
+  const doubled = track.bpm * 2;
+  if (doubled > MAX_BPM) return null;
+  // 자기상관이 2배 후보를 실제로 지목했을 때만 본다. 근거 없이 올리지 않는다
+  const rival = tempo.candidates.find(
+    (c) => Math.abs(c.bpm / doubled - 1) < 0.06 && c.weight >= OCTAVE_RIVAL,
+  );
+  if (!rival) return null;
+
+  const slow = halfBeatStrength(onset, fps, track.beats);
+  if (slow < HALF_BEAT_STRONG) return null;
+
+  const fast = trackBeats(onset, fps, doubled);
+  if (fast.beats.length < 8 || fast.bpm <= 0) return null;
+  const fastRatio = halfBeatStrength(onset, fps, fast.beats);
+  return fastRatio <= slow * OCTAVE_IMPROVE ? fast : null;
 }
 
 /**

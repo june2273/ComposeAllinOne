@@ -20,11 +20,11 @@ import {
   type Interval,
   NOTE_NAMES,
   type Pitch,
+  diatonicHalfSteps,
   intervalBetween,
   isBlackKey,
   natural,
   noteName,
-  noteNames,
   octaveOf,
   pitchClass,
   pitchClasses,
@@ -55,7 +55,6 @@ export interface Question {
   readonly answerNotes: readonly number[];
   readonly requiredPcs: ReadonlySet<number>;
   readonly optionalPcs: ReadonlySet<number>;
-  readonly keyContext: string | null;
   /** 연습 화면에 띄울 안내 */
   readonly prompt: string;
   /** 정답 표시용 (스펠링이 생기면 여기가 바뀐다) */
@@ -112,7 +111,6 @@ export class SingleNoteGenerator implements QuestionGenerator {
       answerNotes: [note],
       requiredPcs: pitchClasses([note]),
       optionalPcs: new Set(),
-      keyContext: null,
       prompt: `${noteName(this.axes.noteLow)}~${noteName(this.axes.noteHigh)} 중 한 음`,
       answerText: noteName(note),
       tags: [
@@ -139,25 +137,61 @@ export interface IntervalQuestion extends Question {
   readonly lower: Pitch;
   readonly upper: Pitch;
   readonly interval: Interval;
+  /**
+   * 음정 안의 **온음계적 반음 개수**(미–파, 시–도). 교재 음정표의 세로축이다.
+   * `interval.semitones`(반음계적 거리)와 다른 값이니 섞지 말 것 — theory의
+   * `diatonicHalfSteps` 주석 참조.
+   */
+  readonly halfSteps: number;
 }
 
 export function isIntervalQuestion(q: Question): q is IntervalQuestion {
   return "interval" in q;
 }
 
-/** 사용자가 화면에서 고른 답. 셋 다 채워져야 제출된다. */
+// --- 화면에서 만든 답 ---------------------------------------------------------
+//
+// 스테이지마다 묻는 것이 달라 응답 모양도 다르다. **`form`으로 구분한다** —
+// 필드 유무로 알아내려 하면(예전 `isIntervalResponse`가 그랬다) 스테이지가
+// 늘어날 때마다 판별이 애매해진다.
+
+/** 연습 1 — 도수와 반음 개수. */
+export interface CountResponse {
+  readonly form: "count";
+  readonly number: number | null;
+  readonly halfSteps: number | null;
+}
+
+/** 연습 2 — 성질만. 도수와 반음은 문제가 알려준다. */
+export interface QualityResponse {
+  readonly form: "quality";
+  readonly quality: string | null;
+}
+
+/** 본 단계 — 도수와 성질. 반음은 머릿속에서만 센다. */
 export interface IntervalResponse {
-  readonly number: number | null;      // 도수
-  readonly semitones: number | null;   // 반음 수
-  readonly quality: string | null;     // 완전 / 장 / 단 / 증 / 감
+  readonly form: "interval";
+  readonly number: number | null;
+  readonly quality: string | null;
 }
 
-export function isIntervalResponse(v: unknown): v is IntervalResponse {
-  return typeof v === "object" && v !== null && "quality" in v && "semitones" in v;
+export type StageResponse = CountResponse | QualityResponse | IntervalResponse;
+
+export function isStageResponse(v: unknown): v is StageResponse {
+  if (typeof v !== "object" || v === null || !("form" in v)) return false;
+  const form = (v as { form: unknown }).form;
+  return form === "count" || form === "quality" || form === "interval";
 }
 
-export function responseText(r: IntervalResponse): string {
-  return `${r.quality ?? "?"}${r.number ?? "?"}도 / ${r.semitones ?? "?"}반음`;
+export function responseText(r: StageResponse): string {
+  switch (r.form) {
+    case "count":
+      return `${r.number ?? "?"}도 · 반음 ${r.halfSteps ?? "?"}개`;
+    case "quality":
+      return `${r.quality ?? "?"}음정`;
+    case "interval":
+      return `${r.quality ?? "?"}${r.number ?? "?"}도`;
+  }
 }
 
 /**
@@ -174,7 +208,7 @@ export function responseText(r: IntervalResponse): string {
  * 트라이톤이 한 번도 안 나온다 — 정작 가장 연습이 필요한 음정인데도.
  */
 export class DiatonicIntervalGenerator implements QuestionGenerator {
-  readonly kind = "interval_id";
+  readonly kind: string;
   static readonly MIN_NUMBER = 2;
   static readonly MAX_NUMBER = 8;
 
@@ -185,9 +219,21 @@ export class DiatonicIntervalGenerator implements QuestionGenerator {
   private readonly names: string[];
   private lastName: string | null = null;
   private readonly rng: Rng;
+  private readonly prompt: string;
 
-  constructor(axes: DifficultyAxes, rng: Rng = new Rng()) {
+  /**
+   * 음정 3단계가 **이 생성기 하나를 공유한다.** 문제(두 자연음)는 같고 무엇을
+   * 묻는지만 다르므로, 다른 것은 `kind`와 안내 문구뿐이다. 스테이지마다 생성기를
+   * 복제하면 출제 분포를 세 곳에서 따로 관리하게 된다.
+   */
+  constructor(
+    axes: DifficultyAxes,
+    rng: Rng = new Rng(),
+    labels: { kind?: string; prompt?: string } = {},
+  ) {
     this.rng = rng;
+    this.kind = labels.kind ?? "interval_id";
+    this.prompt = labels.prompt ?? "두 음 사이의 음정은?";
     const pcs = axes.allowedPitchClasses;
     if (pcs === null) {
       throw new Error(
@@ -242,14 +288,16 @@ export class DiatonicIntervalGenerator implements QuestionGenerator {
     const { lower, upper, interval } = this.rng.choice(this.byInterval.get(name)!);
 
     const notes = [lower.midi, upper.midi];
+    const halfSteps = diatonicHalfSteps(lower, upper);
     return {
       kind: this.kind,
       answerNotes: notes,
       requiredPcs: pitchClasses(notes),
       optionalPcs: new Set(),
-      keyContext: null,
-      prompt: "두 음 사이의 음정은?",
-      answerText: `${interval.name} — ${lower.name}–${upper.name}, ${interval.semitones}반음`,
+      prompt: this.prompt,
+      // 세 단계가 같은 문구를 쓴다. 무엇을 물었든 정답 전체를 보여주는 편이
+      // 낫다 — 연습 1에서 성질까지 눈에 익히는 것이 다음 단계로 이어진다.
+      answerText: `${interval.name} — ${lower.name}–${upper.name}, 반음 ${halfSteps}개`,
       tags: [
         "화성학",
         "음정",
@@ -257,27 +305,13 @@ export class DiatonicIntervalGenerator implements QuestionGenerator {
         "화성음정",          // 동시에 울림 (선율음정과 구분)
         `${interval.number}도`,
         interval.quality,
-        `${interval.semitones}반음`,
+        `반음${halfSteps}개`,
       ],
       lower,
       upper,
       interval,
+      halfSteps,
     };
-  }
-}
-
-/** 미리 정해둔 문제를 순서대로 낸다. 테스트·오답 재출제용. */
-export class FixedGenerator implements QuestionGenerator {
-  readonly kind = "fixed";
-  private i = 0;
-  private readonly questions: readonly Question[];
-  constructor(questions: readonly Question[]) {
-    this.questions = questions;
-  }
-  generate(): Question {
-    const q = this.questions[this.i % this.questions.length];
-    this.i += 1;
-    return q;
   }
 }
 
@@ -288,6 +322,18 @@ export class FixedGenerator implements QuestionGenerator {
  */
 export function makeGenerator(config: SessionConfig, rng?: Rng): QuestionGenerator {
   const axes = config.difficulty;
+  if (config.stage === Stage.IntervalCount) {
+    return new DiatonicIntervalGenerator(axes, rng, {
+      kind: Stage.IntervalCount,
+      prompt: "몇 도이고, 반음(미–파·시–도)은 몇 개인가?",
+    });
+  }
+  if (config.stage === Stage.IntervalTable) {
+    return new DiatonicIntervalGenerator(axes, rng, {
+      kind: Stage.IntervalTable,
+      prompt: "도수와 반음 개수를 보고 성질을 고르세요",
+    });
+  }
   if (config.stage === Stage.IntervalId) {
     return new DiatonicIntervalGenerator(axes, rng);
   }
@@ -296,5 +342,3 @@ export function makeGenerator(config: SessionConfig, rng?: Rng): QuestionGenerat
   }
   return new SingleNoteGenerator(axes, rng);
 }
-
-export { noteNames };

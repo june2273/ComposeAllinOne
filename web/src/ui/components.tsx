@@ -11,8 +11,6 @@ import { StaffFigure } from "../ds";
 import { ScoreRenderer } from "../core/score";
 import type { Pitch } from "../core/theory";
 
-export { Card, NavBar } from "../ds";
-
 /**
  * 두 음을 오선지로.
  *

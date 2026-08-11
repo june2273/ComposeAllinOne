@@ -22,6 +22,7 @@ export const Phase = {
   Lockout: "lockout",     // 문제는 정해졌으나 입력을 받지 않는다 (4절)
   Listening: "listening", // 입력 대기
   Feedback: "feedback",   // 채점 결과 표시 중
+  Paused: "paused",       // 일시정지 — 어디서든 들어오고 왔던 곳으로 돌아간다
   Finished: "finished",   // 세션 종료
 } as const;
 export type Phase = (typeof Phase)[keyof typeof Phase];
@@ -113,11 +114,15 @@ export class Session {
     this.current = null;
     this.results = [];
     this.collector.clear();
+    this.resumePhase = null;
   }
 
   /** 다음 문제를 뽑고 락아웃 상태로 들어간다. null이면 세션 종료. */
   nextQuestion(): Question | null {
-    if (this.index >= this.config.questionCount) {
+    const limit = this.config.questionCount;
+    // 무한 라운드(null)에서는 이 조건이 영영 참이 되지 않는다. 끝내는 것은
+    // 사용자(ESC → 그만두기)뿐이다.
+    if (limit !== null && this.index >= limit) {
       this.phase = Phase.Finished;
       this.current = null;
       return null;
@@ -151,6 +156,47 @@ export class Session {
   }
   get finished(): boolean {
     return this.phase === Phase.Finished;
+  }
+  get paused(): boolean {
+    return this.phase === Phase.Paused;
+  }
+
+  // --- 일시정지 --------------------------------------------------------------
+  //
+  // 국면 5개가 한 방향으로만 흐른다는 전제를 처음으로 깨는 자리다(무한 라운드에
+  // 멈출 방법이 필요해서 들어왔다). 갈라지는 전이가 이 하나뿐이라 아직
+  // State 패턴을 넣지 않고 되돌아갈 국면만 기억한다 — 두 번째가 생기면 그때
+  // 다시 판단할 것.
+
+  private resumePhase: Phase | null = null;
+
+  /** 멈춘다. 시작 전·종료 후에는 아무 일도 없다(false). */
+  pause(): boolean {
+    if (
+      this.phase === Phase.Idle ||
+      this.phase === Phase.Finished ||
+      this.phase === Phase.Paused
+    ) {
+      return false;
+    }
+    this.resumePhase = this.phase;
+    this.phase = Phase.Paused;
+    // 멈춰 있는 동안 눌린 건반이 재개 후의 답으로 새지 않게 비운다
+    this.collector.clear();
+    return true;
+  }
+
+  /**
+   * 재개한다. **어느 국면에서 멈췄는지**를 돌려주고 국면 자체는 락아웃으로
+   * 놓는다 — 재개 직후의 잔여 입력을 4절 규칙대로 버리기 위해서다. 다음에
+   * 무엇을 할지(문제를 다시 들려줄지, 다음 문제로 넘어갈지)는 호출자가 정한다.
+   */
+  resume(): Phase | null {
+    if (this.phase !== Phase.Paused) return null;
+    const from = this.resumePhase ?? Phase.Lockout;
+    this.resumePhase = null;
+    this.phase = Phase.Lockout;
+    return from;
   }
 
   // --- 재생 횟수 축 ---------------------------------------------------------
@@ -232,11 +278,7 @@ export class Session {
   // --- 요약 -----------------------------------------------------------------
 
   get progressText(): string {
-    return `문제 ${this.index} / ${this.config.questionCount}`;
-  }
-
-  /** 오답 재출제용. */
-  wrongQuestions(): Question[] {
-    return this.results.filter((r) => !r.correct).map((r) => r.question);
+    const limit = this.config.questionCount;
+    return limit === null ? `문제 ${this.index}` : `문제 ${this.index} / ${limit}`;
   }
 }

@@ -59,7 +59,13 @@ interface Toolkit {
   renderToSVG(page: number): string;
 }
 
-const OPTIONS = {
+/**
+ * 두 음짜리 그림용. 한 줄에 다 들어가므로 줄바꿈을 끄고 여백을 줄인다.
+ *
+ * 여백을 줄이는 것은 가로로 지나치게 납작해지는 것을 막기 위해서다. 한 마디에
+ * 음표 두 개뿐이라 기본 여백(50)이면 종횡비가 5:1을 넘는다.
+ */
+const INTERVAL_OPTIONS = {
   pageWidth: 1500,
   scale: 60,
   adjustPageHeight: true,
@@ -67,12 +73,36 @@ const OPTIONS = {
   header: "none",
   footer: "none",
   breaks: "none",
-  // 여백을 줄여 가로로 지나치게 납작해지는 것을 막는다. 한 마디에 음표
-  // 두 개뿐이라 기본 여백(50)이면 종횡비가 5:1을 넘는다.
   pageMarginLeft: 10,
   pageMarginRight: 10,
   pageMarginTop: 10,
   pageMarginBottom: 10,
+  svgViewBox: true,
+};
+
+/**
+ * 여러 마디짜리 악보용(전사 결과).
+ *
+ * **`adjustPageWidth`를 켜면 안 된다** — 줄바꿈 없이 한 줄로 늘어나서 2분짜리
+ * 멜로디가 폭 수만 픽셀의 SVG가 된다. 대신 폭을 고정하고 `breaks: "auto"`로
+ * 여러 단에 흘린다. 높이는 넉넉히 두고 `adjustPageHeight`로 잘라 **한 페이지에
+ * 전부 담는다** — `renderToSVG(1)`이 1쪽만 주므로 페이지가 갈리면 뒤가 사라진다.
+ */
+const SCORE_OPTIONS = {
+  // 한 단에 마디를 적게 넣을수록 커 보인다 — SVG는 폭에 맞춰 늘어나므로
+  // 여기 폭이 곧 확대율의 역수다(실측: 2100이면 음표가 읽기 버겁다)
+  pageWidth: 1400,
+  pageHeight: 60_000,
+  scale: 50,
+  adjustPageHeight: true,
+  adjustPageWidth: false,
+  header: "none",
+  footer: "none",
+  breaks: "auto",
+  pageMarginLeft: 40,
+  pageMarginRight: 40,
+  pageMarginTop: 20,
+  pageMarginBottom: 20,
   svgViewBox: true,
 };
 
@@ -98,7 +128,6 @@ export class ScoreRenderer {
         ]);
         const module = await createModule();
         const tk = new VerovioToolkit(module) as unknown as Toolkit;
-        tk.setOptions(OPTIONS);
         return new ScoreRenderer(tk);
       })();
       attempt.catch(() => {
@@ -109,14 +138,27 @@ export class ScoreRenderer {
     return ScoreRenderer.instance;
   }
 
-  render(musicXml: string): string {
+  /**
+   * 툴킷 하나를 공유하므로 **옵션은 그릴 때마다 건다.** 로드 시점에 한 번만
+   * 걸면 음정 그림과 전사 악보가 서로의 설정을 물려받는다.
+   */
+  private draw(musicXml: string, options: Record<string, unknown>): string {
+    this.tk.setOptions(options);
     if (!this.tk.loadData(musicXml)) {
       throw new Error("verovio가 MusicXML을 읽지 못했습니다");
     }
     return this.tk.renderToSVG(1);
   }
 
+  /** 여러 마디짜리 악보. 전사 결과가 이 경로로 온다 */
+  render(musicXml: string): string {
+    return this.draw(musicXml, SCORE_OPTIONS);
+  }
+
   renderInterval(lower: Pitch, upper: Pitch, fifths = 0): string {
-    return this.render(harmonicIntervalMusicXml(lower, upper, fifths));
+    return this.draw(
+      harmonicIntervalMusicXml(lower, upper, fifths),
+      INTERVAL_OPTIONS,
+    );
   }
 }

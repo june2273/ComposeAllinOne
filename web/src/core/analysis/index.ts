@@ -33,7 +33,15 @@
 import { extractFeatures, normalizeOnset, ANALYSIS_RATE } from "./features";
 import { estimateKey, type KeyEstimate } from "./key";
 import { estimateMeter, type MeterEstimate } from "./meter";
-import { estimateTempo, trackBeats, type TempoCandidate } from "./tempo";
+import {
+  type BeatTrack,
+  estimateTempo,
+  MAX_BPM,
+  resolveOctave,
+  type TempoCandidate,
+  type TempoEstimate,
+  trackBeats,
+} from "./tempo";
 
 export { ANALYSIS_RATE, FRAME_SIZE, HOP_SIZE } from "./features";
 export type { KeyEstimate, MeterEstimate };
@@ -89,18 +97,25 @@ export function analyzeAudio(
   const tempo = estimateTempo(onset, features.fps);
 
   report("비트 추적", 0.85);
-  const track = tempo.bpm > 0
+  let track = tempo.bpm > 0
     ? trackBeats(onset, features.fps, tempo.bpm)
     : { beats: [], bpm: 0, steadiness: 0 };
+  // **배수 점검.** 자기상관은 정수배를 원리적으로 못 가리므로 악센트 구조로
+  // 한 번 더 본다 — 이걸 안 하면 173BPM 곡이 87BPM으로 나가고, 박자·격자·
+  // 악보가 전부 그 위에 얹힌다(`resolveOctave`).
+  const faster = resolveOctave(onset, features.fps, tempo, track);
+  if (faster) track = faster;
 
   report("박자 판정", 0.92);
-  const meter = estimateMeter(
-    track.beats,
-    features.fps,
-    features.onset,
-    features.low,
-    features.chroma,
-  );
+  const measure = (beats: readonly number[]) =>
+    estimateMeter(beats, features.fps, features.onset, features.low, features.chroma);
+  let meter = measure(track.beats);
+  // **2/4가 나오면 템포가 절반이라고 본다**(`resolveDupleMeter`).
+  const duple = resolveDupleMeter(onset, features.fps, tempo, track, meter, measure);
+  if (duple) {
+    track = duple.track;
+    meter = duple.meter;
+  }
 
   report("조성 판정", 0.96);
   const key = estimateKey(features.chroma);
@@ -121,6 +136,56 @@ export function analyzeAudio(
     beats: track.beats,
     downbeats: meter.downbeats,
   };
+}
+
+/**
+ * 2배 후보를 이만큼은 자기상관이 지목해야 갈아탄다.
+ *
+ * `resolveOctave`의 문턱(0.7)보다 낮다 — 거기서는 악센트만 보지만 여기서는
+ * **박자 판정이 2/4라는 독립된 증거**가 이미 하나 있기 때문이다.
+ */
+const DUPLE_RIVAL = 0.25;
+
+/**
+ * **2/4가 나왔다면 템포가 절반이라고 본다.** 갈아탈 이유가 없으면 `null`.
+ *
+ * ## 왜 이 규칙이 맞는가
+ *
+ * 대중음악에서 2/4는 드물다. 반대로 **템포가 절반으로 잡히면 진짜 4/4 마디가
+ * 우리 박으로 정확히 2박이 되어** 축 B가 2를 고른다. 즉 2/4라는 출력은 박자에
+ * 대한 답이라기보다 **"비트가 두 배 길다"는 신고**에 가깝다.
+ *
+ * `resolveOctave`가 먼저 악센트로 같은 것을 잡지만, 그쪽은 반박이 뚜렷해야만
+ * 걸린다. 여기는 **박자 판정 결과라는 다른 증거**를 쓰므로 그것이 놓친 경우를
+ * 받는다.
+ *
+ * ## 확인하고 바꾼다
+ *
+ * 무조건 두 배로 올리지 않는다. 자기상관 후보에 2배가 실제로 있어야 하고
+ * (`DUPLE_RIVAL`), 두 배로 다시 추적해서 **박자가 4/4로 풀려야** 채택한다.
+ * 안 풀리면 원래 답을 그대로 둔다 — 근거 없이 숫자만 두 배로 만들면 2/4가
+ * 알려주던 사실까지 지워진다.
+ */
+export function resolveDupleMeter(
+  onset: Float32Array,
+  fps: number,
+  tempo: TempoEstimate,
+  track: BeatTrack,
+  meter: MeterEstimate,
+  measure: (beats: readonly number[]) => MeterEstimate,
+): { track: BeatTrack; meter: MeterEstimate } | null {
+  if (meter.beatsPerBar !== 2 || track.bpm <= 0) return null;
+  const doubled = track.bpm * 2;
+  if (doubled > MAX_BPM) return null;
+  const rival = tempo.candidates.find(
+    (c) => Math.abs(c.bpm / doubled - 1) < 0.06 && c.weight >= DUPLE_RIVAL,
+  );
+  if (!rival) return null;
+
+  const faster = trackBeats(onset, fps, doubled);
+  if (faster.beats.length < 8 || faster.bpm <= 0) return null;
+  const remeasured = measure(faster.beats);
+  return remeasured.beatsPerBar === 4 ? { track: faster, meter: remeasured } : null;
 }
 
 /** 박자표를 악센트 패턴으로. 숫자만으로는 3/4와 6/8이 헷갈린다(사양서 §6). */

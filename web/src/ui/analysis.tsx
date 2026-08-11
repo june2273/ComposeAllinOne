@@ -19,28 +19,33 @@ import {
 } from "../core/analysis";
 import {
   Button,
+  Fieldset,
   FilePicker,
   Metric,
   MetricGrid,
   PageHeading,
   ProgressBar,
+  ShareBars,
   SpecSection,
   Stack,
 } from "../ds";
 import { analyzeFile } from "../platform/analyze";
+import {
+  TranscriptionPanel,
+  type TranscriptionPanelProps,
+} from "./transcription";
 
 /** 지금 못 하는 것들. 카탈로그의 `requires`와 달리 **사용자가 읽을 문장**이다. */
 const NOT_YET = [
-  "스템 분리(보컬·드럼·베이스) — 무거운 모델이 필요하다",
   "코드 진행 — 비트 동기 크로마까지는 이미 있고 인식 모델이 없다",
-  "멜로디 피치 커브 · MIDI · 악보 변환",
   "변박 · 전조 · 변속 — 곡 전체를 한 덩어리로 본다. 구간을 나누려면 구조 분석이 먼저다",
+  "구조 분석(섹션 경계) — 위의 셋이 전부 여기에 걸려 있다",
 ];
 
 type State =
   | { name: "idle" }
   | { name: "running"; file: string; progress: AnalysisProgress }
-  | { name: "done"; file: string; report: AnalysisReport }
+  | { name: "done"; file: File; report: AnalysisReport }
   | { name: "error"; file: string; message: string };
 
 function seconds(value: number): string {
@@ -82,9 +87,12 @@ function note(confidence: number): string | undefined {
 
 export function AnalysisPage({
   analyze = analyzeFile,
+  transcription,
 }: {
   /** 테스트가 가짜 분석기를 넣는 자리. 앱에서는 넘기지 않는다 */
   analyze?: typeof analyzeFile;
+  /** 테스트가 가짜 사이드카를 넣는 자리 */
+  transcription?: Partial<TranscriptionPanelProps>;
 }) {
   const [state, setState] = useState<State>({ name: "idle" });
 
@@ -117,7 +125,8 @@ export function AnalysisPage({
       ).then(
         (report) => {
           if (controller.signal.aborted) return;
-          setState({ name: "done", file: file.name, report });
+          // 파일 자체를 들고 있는다 — AI 칸이 같은 파일을 사이드카에 올린다
+          setState({ name: "done", file, report });
         },
         (error: unknown) => {
           if (controller.signal.aborted) return;
@@ -159,10 +168,10 @@ export function AnalysisPage({
         </p>
       )}
 
-      {report && (
+      {report && state.name === "done" && (
         <>
           <p className="muted">
-            {state.name === "done" ? state.file : ""} · {seconds(report.durationSec)}
+            {state.file.name} · {seconds(report.durationSec)}
           </p>
           <MetricGrid>
             <Metric
@@ -187,6 +196,37 @@ export function AnalysisPage({
               note={note(report.key.confidence)}
             />
           </MetricGrid>
+
+          {/*
+            **후보들이 얼마나 팽팽했는지를 보여준다.** 신뢰도 숫자 하나로는
+            "무엇과 다퉜는가"를 알 수 없는데, 배수 오류(87 대 173)나 3/4 대 4/4는
+            바로 그 다툼에서 갈린다. 고른 답이 1등이 아닐 수도 있다 — 자기상관은
+            정수배를 못 가려서 악센트 구조로 뒤집기 때문이다(`resolveOctave`).
+          */}
+          <Fieldset title="후보">
+            <div className="shares-pair">
+              <ShareBars
+                caption="템포"
+                rows={report.tempo.candidates.map((c) => ({
+                  label: `${c.bpm.toFixed(0)} BPM`,
+                  value: c.probability,
+                  selected: Math.abs(c.bpm / report.tempo.bpm - 1) < 0.03,
+                }))}
+              />
+              <ShareBars
+                caption="박자"
+                rows={report.meter.candidates.map((c) => ({
+                  label: c.value,
+                  value: c.probability,
+                  selected: c.beatsPerBar === report.meter.beatsPerBar,
+                }))}
+              />
+            </div>
+          </Fieldset>
+
+          {/* 여기부터는 로컬 사이드카가 있을 때만 나온다. 없으면 안내 한 줄이다 */}
+          <TranscriptionPanel report={report} file={state.file} {...transcription} />
+
           <Button onClick={() => setState({ name: "idle" })}>다른 파일 분석</Button>
         </>
       )}

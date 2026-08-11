@@ -36,6 +36,17 @@
   /* 강조 — 브랜드 색이 들어올 자리 */
   --color-accent: light-dark(#2f6df6, #6b9bff);
   --color-accent-text: #ffffff;
+  /* 강조색을 면으로 깔 때. 그 위에 --color-accent 글자가 읽혀야 한다 */
+  --color-accent-soft: light-dark(#e7effd, #1c2942);
+
+  /*
+   * 그래프에서 **고르지 않은 쪽**을 칠하는 회색.
+   *
+   * `--color-border-strong`을 쓰지 않는다 — 밝은 테마에서 면 대비가 1.94:1이라
+   * 막대가 배경에 묻힌다(검증 도구 실측). 아래 값은 밝은·어두운 양쪽에서 면
+   * 대비 3:1을 넘고, 강조색과의 색맹 구별 거리도 ΔE 18 이상이다.
+   */
+  --color-chart-muted: light-dark(#8b93a1, #6e7684);
 
   /* 판정 */
   --color-correct: light-dark(#1a7f4b, #4ade80);
@@ -71,7 +82,9 @@
     sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
 
-  /* 레이아웃 */
-  --app-max-width: 720px;
+  /* 레이아웃 — 2분할 메뉴가 들어가면서 720px에서 넓혔다 */
+  --app-max-width: 960px;
+  /* 2분할의 왼쪽 폭. 오른쪽은 남는 만큼 */
+  --menu-width: 240px;
   --transition: 120ms ease;
 }

@@ -13,12 +13,9 @@
  * 미는데, 브라우저의 리샘플링이 Python판의 선형 보간과 같은 역할을 한다.
  */
 
-import {
-  type AudioBackend,
-  ARPEGGIO_GAP_SEC,
-  SineSynth,
-} from "../core/audio";
+import { type AudioBackend, ARPEGGIO_GAP_SEC, NullSynth } from "../core/audio";
 import type { PlayMode } from "../core/config";
+import { SineSynth } from "./synth";
 
 const MANIFEST_URL = "piano/manifest.json";
 const BASE = "piano/";
@@ -250,8 +247,10 @@ export class PianoSynth implements AudioBackend {
  */
 export function makeAudioBackend(env?: PianoEnv): AudioBackend {
   if (typeof AudioContext === "undefined") {
-    // jsdom 등 오디오가 없는 환경
-    return new SineSynth();
+    // jsdom 등 오디오가 없는 환경. **SineSynth를 주면 안 된다** — 그쪽도
+    // AudioContext를 만들므로 첫 재생에서 그대로 터진다(실측: 세션을 끝까지
+    // 굴리는 App 테스트에서 "AudioContext is not defined").
+    return new NullSynth();
   }
   const piano = new PianoSynth(env);
   void piano.load();

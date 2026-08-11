@@ -16,12 +16,14 @@ import type { AudioBackend } from "../core/audio";
 import type { SessionConfig } from "../core/config";
 import { makeGrader } from "../core/grading";
 import { type Question, Rng, makeGenerator } from "../core/questions";
-import { type Result, Session } from "../core/session";
+import { Phase, type Result, Session } from "../core/session";
 
 export interface SessionView {
   question: Question | null;
   /** 락아웃 중에는 false — 이때 들어온 입력은 전부 버려진다 */
   accepting: boolean;
+  /** ESC로 멈춘 상태. 타이머가 서고 입력이 막힌다 */
+  paused: boolean;
   progressText: string;
   score: number;
   /** 남은 초. 제한시간이 없으면 null */
@@ -54,6 +56,7 @@ export function useSession(
   const [view, setView] = useState<SessionView>({
     question: null,
     accepting: false,
+    paused: false,
     progressText: "",
     score: 0,
     remaining: config.difficulty.timeLimitSec,
@@ -64,6 +67,8 @@ export function useSession(
   });
 
   const startedAt = useRef(0);
+  /** 멈춘 시점까지 이 문제에 쓴 시간. 재개하면 여기서부터 다시 흐른다 */
+  const pausedAt = useRef(0);
   const nextRef = useRef<() => void>(() => {});
   const timers = useRef<number[]>([]);
   const ticker = useRef<number | null>(null);
@@ -94,6 +99,7 @@ export function useSession(
         ...prev,
         question: session.current,
         accepting: session.accepting,
+        paused: session.paused,
         progressText: session.progressText,
         score: session.score,
         finished: session.finished,
@@ -134,15 +140,11 @@ export function useSession(
     [config.feedbackMs, later, sync],
   );
 
-  const beginListening = useCallback(() => {
-    if (!session.current || session.finished) return;
-    session.beginListening();
-    sync({ result: null });
-    play();
-    startedAt.current = performance.now();
-
+  /** 카운트다운 시작. 제한시간이 무한이면 아무것도 하지 않는다. */
+  const startTicker = useCallback(() => {
     const limit = config.difficulty.timeLimitSec;
     if (limit === null) return;
+    if (ticker.current !== null) clearInterval(ticker.current);
     ticker.current = setInterval(() => {
       const remaining = limit - elapsed();
       if (remaining <= 0) {
@@ -151,7 +153,16 @@ export function useSession(
       }
       setView((prev) => ({ ...prev, remaining, ratio: remaining / limit }));
     }, TICK_MS) as unknown as number;
-  }, [config.difficulty.timeLimitSec, elapsed, play, session, settle, sync]);
+  }, [config.difficulty.timeLimitSec, elapsed, session, settle]);
+
+  const beginListening = useCallback(() => {
+    if (!session.current || session.finished) return;
+    session.beginListening();
+    sync({ result: null });
+    play();
+    startedAt.current = performance.now();
+    startTicker();
+  }, [play, session, startTicker, sync]);
 
   const nextQuestion = useCallback(() => {
     const question = session.nextQuestion();
@@ -189,6 +200,49 @@ export function useSession(
     if (session.accepting) play();
   }, [play, session]);
 
+  // --- 일시정지 --------------------------------------------------------------
+  //
+  // 시간을 재는 쪽이 여기이므로 멈추는 것도 여기다. Session은 국면만 바꾼다.
+
+  const pause = useCallback(() => {
+    const before = session.phase;
+    if (!session.pause()) return;
+    // 듣던 중이었을 때만 시계가 의미를 갖는다. 락아웃 중이었다면 이 문제는
+    // 아직 시작도 안 한 것이므로 0에서 다시 센다.
+    pausedAt.current = before === Phase.Listening ? elapsed() : 0;
+    // 카운트다운·피드백 전환·화음 확정 타이머를 전부 세운다. 재개할 때
+    // 필요한 것만 다시 건다.
+    clearTimers();
+    sync();
+  }, [clearTimers, elapsed, session, sync]);
+
+  const resume = useCallback(() => {
+    const from = session.resume();
+    if (from === null) return;
+    if (from === Phase.Feedback) {
+      // 결과를 보던 중이었다면 남은 표시 시간을 기다리지 않고 다음 문제로 간다
+      nextRef.current();
+      return;
+    }
+    sync();
+    // **재개해도 락아웃을 다시 준다.** 멈춰 있는 동안 눌린 키가 답으로 새는
+    // 것을 막는 것이 4절 규칙의 취지다.
+    later(() => {
+      // 아직 들려주지 않은 문제(락아웃 중 정지)라면 재생부터 해야 한다.
+      if (from === Phase.Lockout) {
+        beginListening();
+        return;
+      }
+      // 이미 들은 문제는 다시 들려주지 않는다 — 재생 횟수 축(replayLimit)을
+      // 일시정지로 우회할 수 있으면 안 된다.
+      session.beginListening();
+      // 멈춰 있던 시간은 푸는 데 쓴 시간이 아니다. 그만큼 시계를 되돌린다.
+      startedAt.current = performance.now() - pausedAt.current * 1000;
+      sync({ result: null });
+      startTicker();
+    }, config.inputLockoutMs);
+  }, [beginListening, config.inputLockoutMs, later, session, startTicker, sync]);
+
   /** 화면에서 만든 답(음정 등). MIDI 경로와 같은 게이트를 지난다. */
   const respond = useCallback(
     (response: unknown) => {
@@ -217,5 +271,5 @@ export function useSession(
 
   useEffect(() => () => clearTimers(), [clearTimers]);
 
-  return { view, start, replay, respond, noteOn, session };
+  return { view, start, replay, respond, noteOn, pause, resume, session };
 }

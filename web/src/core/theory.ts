@@ -37,8 +37,10 @@ export function noteName(midiNote: number): string {
   return `${NOTE_NAMES[pitchClass(midiNote)]}${octaveOf(midiNote)}`;
 }
 
-export function noteNames(midiNotes: Iterable<number>): string {
-  return [...midiNotes].sort((a, b) => a - b).map(noteName).join(" ");
+/** 여러 음을 낮은 순으로 나열한다. 하나도 없으면 `empty`. */
+export function noteNames(midiNotes: Iterable<number>, empty = ""): string {
+  const sorted = [...midiNotes].sort((a, b) => a - b);
+  return sorted.length ? sorted.map(noteName).join(" ") : empty;
 }
 
 export function isBlackKey(midiNote: number): boolean {
@@ -121,8 +123,6 @@ export const DIMINISHED = "감";
 export const DOUBLY_AUGMENTED = "겹증";
 export const DOUBLY_DIMINISHED = "겹감";
 
-export const QUALITIES = [PERFECT, MAJOR, MINOR, AUGMENTED, DIMINISHED] as const;
-
 /** 기준 반음 수와의 차이 → 성질 */
 const PERFECT_QUALITY: Record<number, string> = {
   0: PERFECT, 1: AUGMENTED, [-1]: DIMINISHED,
@@ -151,10 +151,6 @@ export class Interval {
     return `${this.quality}${this.number}도`;
   }
 
-  get isPerfectFamily(): boolean {
-    return PERFECT_STEPS.has(((this.number - 1) % 7) + 1);
-  }
-
   toString(): string {
     return this.name;
   }
@@ -166,6 +162,43 @@ export class Interval {
  * 도수는 **음이름 계단 수**로, 성질은 그 도수의 기준 반음 수와 실제 반음
  * 수의 차이로 정한다. 이 두 축을 분리하는 것이 음정 계산의 전부다.
  */
+/**
+ * 음정 안에 든 **온음계적 반음의 개수** (미–파, 시–도).
+ *
+ * ## `Interval.semitones`와 다른 개념이다 — 헷갈리면 전부 틀린다
+ *
+ * | | C4–A4 | 뜻 |
+ * |---|---|---|
+ * | `Interval.semitones` | **9** | 건반을 반음 단위로 센 거리(반음계적) |
+ * | `diatonicHalfSteps` | **1** | 음이름 사다리를 오르며 만난 반음 자리의 수 |
+ *
+ * 한국 화성학 교재의 음정표(`ui/stages.tsx`의 `INTERVAL_TABLE`)가 쓰는 것은
+ * **아래쪽**이다. "6도에 반음 1개면 장6도"처럼 도수와 짝지어 성질을 읽는다.
+ * 두 값이 같은 이름("반음")으로 불리므로 **UI 문구에서 반드시 하나만 쓸 것.**
+ *
+ * ## 자연음 전용이다
+ *
+ * 임시표가 붙으면 반음 자리가 옮겨 다녀서 이 셈법 자체가 성립하지 않는다
+ * (E♭–F는 온음, E–F♯도 온음). 교재의 표도 온음계 안에서만 유효하다.
+ * 반음정 스테이지를 만들 때 이 함수를 재사용하려 하지 말 것.
+ */
+export function diatonicHalfSteps(a: Pitch, b: Pitch): number {
+  if (a.alter !== 0 || b.alter !== 0) {
+    throw new Error(
+      `온음계적 반음은 자연음 사이에서만 셀 수 있습니다: ${a.name}–${b.name}`,
+    );
+  }
+  const [lower, upper] = a.step <= b.step ? [a, b] : [b, a];
+  let count = 0;
+  // 사다리를 한 계단씩 오르며 "이 계단에서 다음 계단까지가 반음인가"를 본다.
+  // 자연음에서 반음인 곳은 E→F와 B→C 둘뿐이다.
+  for (let s = lower.step; s < upper.step; s += 1) {
+    const letter = LETTERS[((s % 7) + 7) % 7];
+    if (letter === "E" || letter === "B") count += 1;
+  }
+  return count;
+}
+
 export function intervalBetween(a: Pitch, b: Pitch): Interval {
   const [lower, upper] = a.step <= b.step ? [a, b] : [b, a];
   const number = upper.step - lower.step + 1;
