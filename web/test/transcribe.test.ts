@@ -217,6 +217,99 @@ function onsetAt(seconds: readonly number[], durationSec: number, height = 5): O
   return { hopMs: ODF_HOP_MS, strength };
 }
 
+describe("1-a. 옥타브 후보(f0Alt) — 프레이즈 단위로 옥타브를 고른다", () => {
+  /**
+   * 배경: 고음에서 기준 f0가 한 옥타브 아래로 깔리는데, 프레임 단위 심판은
+   * 셋 다 죽었다(docs/고음_f0_미해결.md §3). 그래서 사이드카가 옥타브 후보를
+   * `f0Alt`로 싣고 **DP의 연속성이 프레이즈 단위로 고른다.**
+   */
+
+  /** 기준 커브에 옥타브 후보를 얹는다. null이면 그 프레임은 후보 없음 */
+  function withAlt(curve: PitchCurve, alt: readonly [number, number | null][]): PitchCurve {
+    const f0Alt: number[] = [];
+    for (const [seconds, midi] of alt) {
+      for (let i = 0; i < frames(seconds); i += 1) {
+        f0Alt.push(midi === null ? 0 : midiToHz(midi));
+      }
+    }
+    while (f0Alt.length < curve.f0.length) f0Alt.push(0);
+    return { ...curve, f0Alt };
+  }
+
+  test("후보가 없으면 예전과 완전히 같다", () => {
+    const curve = curveOf([[1, 60]]);
+    const withEmpty = { ...curve, f0Alt: curve.f0.map(() => 0) };
+    expect(segmentNotes(withEmpty)).toEqual(segmentNotes(curve));
+  });
+
+  test("옥타브 후보가 지속되면 음표가 위 옥타브에 선다 — 후렴이 사는 자리", () => {
+    // 기준은 한 옥타브 아래(69)로 깔렸고, 후보(81)가 구간 내내 지속된다.
+    // 앞뒤 문맥이 이미 80·81이면 연속성은 후보 쪽이 싸다.
+    const curve = curveOf([
+      [0.5, 80],
+      [1, 69], // 기준이 깔린 구간
+      [0.5, 81],
+    ]);
+    const alt = withAlt(curve, [
+      [0.5, null],
+      [1, 81], // 옥타브 후보
+      [0.5, null],
+    ]);
+    const notes = segmentNotes(alt);
+    // 후보 구간(69→81로 들림)과 뒤의 진짜 81이 같은 상태라 한 음표로 이어진다
+    expect(notes.map((n) => n.midi)).toEqual([80, 81]);
+    expect(notes[1].startSec).toBeCloseTo(0.5, 1);
+    expect(notes[1].endSec).toBeCloseTo(2.0, 1);
+    // 후보 없이 돌리면 기준을 따라 아래로 떨어진다 — 대조군
+    expect(segmentNotes(curve).map((n) => n.midi)).toEqual([80, 69, 81]);
+  });
+
+  test("70ms 미만의 후보 주장은 안 따라간다 — SWITCH_MS 그대로", () => {
+    const curve = curveOf([[1, 60]]);
+    const alt = withAlt(curve, [
+      [0.47, null],
+      [0.06, 72], // 6프레임짜리 주장
+      [0.47, null],
+    ]);
+    expect(segmentNotes(alt).map((n) => n.midi)).toEqual([60]);
+  });
+
+  test("옥타브 관계가 아닌 후보는 무시한다 — 잡음이다", () => {
+    const curve = curveOf([[1, 60]]);
+    // 5도 위(67)를 후보라고 주장 — 사이드카가 걸러야 하지만 외부 입력이라 다시 확인
+    const alt = withAlt(curve, [[1, 67]]);
+    expect(segmentNotes(alt)).toEqual(segmentNotes(curve));
+  });
+
+  test("후보를 따라간 음표의 centsOffset은 후보 기준이다 — 1200에 안 끌려간다", () => {
+    const curve = curveOf([
+      [0.5, 80],
+      [1, 69],
+      [0.5, 81],
+    ]);
+    const alt = withAlt(curve, [
+      [0.5, null],
+      [1, 81],
+      [0.5, null],
+    ]);
+    const lifted = segmentNotes(alt).find((n) => n.midi === 81 && n.startSec < 1.2);
+    expect(lifted).toBeDefined();
+    expect(Math.abs(lifted!.centsOffset)).toBeLessThan(50);
+  });
+
+  test("조율 보정은 후보에도 한 번만 걸린다", () => {
+    // 커브 전체가 +40센트 밀려 있다 — 보정하면 기준 59.6→60? 아니, 값 자체를
+    // +40센트 위로 만들고 tuningCents로 되민다. 후보도 같은 규칙이어야 음이 맞다.
+    const f0 = curveOf([[1, 60]], () => 40);
+    const altHz = f0.f0.map((hz) => (hz > 0 ? hz * 2 ** (12 / 12) : 0));
+    const curve = { ...f0, f0Alt: altHz };
+    // 문맥 없이 단독이면 연속성이 기준을 고르지만, 보정이 두 번 걸리면
+    // 후보 게이트(±0.5반음 허용)가 어긋나 위 테스트들이 흔들린다 — 여기서는
+    // 보정 뒤에도 음표가 정확히 60 하나로 서는 것만 못박는다.
+    expect(segmentNotes(curve, { tuningCents: 40 }).map((n) => n.midi)).toEqual([60]);
+  });
+});
+
 describe("1-b. 온셋 경계 — f0가 표현할 수 없는 재발음", () => {
   /** 같은 음을 1초 내내 유지한 커브. f0만으로는 한 음이다 */
   const held = curveOf([[1, 69]]);

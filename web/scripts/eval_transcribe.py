@@ -117,29 +117,50 @@ def slot(beat: float) -> int:
 
 SLOT_NAME = {0: "정박", 1: "16분", 2: "8분", 3: "16분"}
 
+# 음역 구간(MIDI). **절대 음역으로 고정한다** — "낮은 1/3"식으로 곡마다 나누면
+# 곡 간 비교가 안 된다. `server/scripts/f0_truth.py`와 같은 경계를 쓴다.
+REGISTERS = ((0, 71, "C5 미만"), (72, 76, "C5~E5"), (77, 200, "F5 이상"))
+
+
+def register_of(midi: int) -> str:
+    """음역 이름. **정답 음고 기준으로 센다** — 우리 음표는 `shift`를 더해 옮긴 뒤다.
+
+    유령(정답에 없음)은 맞출 정답이 없으므로 우리가 주장한 음고로 센다. 그래야
+    네 분류가 같은 축 위에 놓인다.
+    """
+    for low, high, name in REGISTERS:
+        if low <= midi <= high:
+            return name
+    return REGISTERS[-1][2]
+
 
 def classify(truth: list[Note], ours: list[Note], shift: int, offset: float) -> dict:
     exact: list[tuple[Note, Note]] = []
     counts = Counter()
     tracks = Counter()
+    registers: dict[str, Counter] = {name: Counter() for _lo, _hi, name in REGISTERS}
     for note in ours:
         near = [t for t in truth if abs(note.beat - offset - t.beat) < MATCH_WINDOW]
         same = [t for t in near if t.midi == note.midi + shift]
         if same:
             pick = min(same, key=lambda t: abs(note.beat - offset - t.beat))
             exact.append((note, pick))
-            counts["정확"] += 1
+            label, where = "정확", pick.midi
             tracks[pick.track] += 1
         elif any((t.midi - note.midi - shift) % 12 == 0 for t in near):
-            counts["옥타브만 다름"] += 1
+            octave = min(near, key=lambda t: abs(note.beat - offset - t.beat))
+            label, where = "옥타브만 다름", octave.midi
         elif near:
-            counts["다른 음"] += 1
+            other = min(near, key=lambda t: abs(note.beat - offset - t.beat))
+            label, where = "다른 음", other.midi
         else:
-            counts["정답에 없음"] += 1
-    return {"exact": exact, "counts": counts, "tracks": tracks}
+            label, where = "정답에 없음", note.midi + shift
+        counts[label] += 1
+        registers[register_of(where)][label] += 1
+    return {"exact": exact, "counts": counts, "tracks": tracks, "registers": registers}
 
 
-def report(truth_path: str, ours_path: str) -> None:
+def report(truth_path: str, ours_path: str, by_register: bool = False) -> None:
     truth, truth_bpm = read_notes(truth_path)
     ours, ours_bpm = read_notes(ours_path)
     beat_ms = 60000 / truth_bpm
@@ -153,6 +174,28 @@ def report(truth_path: str, ours_path: str) -> None:
         + " · ".join(f"{k} {v} ({v / total:.0%})" for k, v in truth_slots.most_common())
     )
 
+    # **박 단위로 비교하므로 두 파일의 BPM이 다르면 숫자가 통째로 거짓이 된다.**
+    # 이 저장소는 템포 배수 오류가 실제로 나므로(곡B: 우리 92.7 대 정답 185)
+    # 조용히 넘어가면 "전사가 나쁘다"로 잘못 읽는다.
+    ratio = ours_bpm / truth_bpm if truth_bpm else 1.0
+    if abs(ratio - 1.0) > 0.05:
+        print(
+            f"** 템포가 다르다: 우리 {ours_bpm:.1f} 대 정답 {truth_bpm:.1f} "
+            f"({ratio:.2f}배) — 아래 박 기준 지표는 읽지 말 것 **"
+        )
+
+    # **정답이 곡의 일부만 덮을 수 있다**(곡B는 210초 중 22~113초만). 그 밖의
+    # 우리 음표를 유령으로 세면 유령 수가 통째로 거짓이 된다.
+    span_start = truth[0].beat - MATCH_WINDOW
+    span_end = truth[-1].beat + truth[-1].dur + MATCH_WINDOW
+    covered = [n for n in ours if span_start <= n.beat <= span_end]
+    if len(covered) != len(ours):
+        print(
+            f"정답 구간 {truth[0].beat:.0f}~{span_end:.0f}박 밖의 우리 음표 "
+            f"{len(ours) - len(covered)}개는 세지 않는다"
+        )
+        ours = covered
+
     shift, offset, hits = align(truth, ours)
     print(f"정렬: 조옮김 {shift:+d}반음, 오프셋 {offset:+.2f}박 (엄격 일치 {hits})")
     if shift:
@@ -163,6 +206,17 @@ def report(truth_path: str, ours_path: str) -> None:
     if result["tracks"]:
         spread = " ".join(f"{t}:{c}" for t, c in sorted(result["tracks"].items()))
         print(f"  정확 매칭이 걸린 정답 트랙: {spread}")
+
+    if by_register:
+        # **고음 문제는 곡 전체 평균에 묻힌다.** 곡E에서 고음 음표가 553 중
+        # 57개뿐이라 전부 틀려도 전체 지표는 10%밖에 안 움직인다.
+        labels = ("정확", "옥타브만 다름", "다른 음", "정답에 없음")
+        print("  음역별:  " + "".join(f"{k:>12}" for k in labels))
+        for _lo, _hi, name in REGISTERS:
+            row = result["registers"][name]
+            total = sum(row.values()) or 1
+            cells = "".join(f"{row[k]:>5} {100 * row[k] / total:>4.0f}%" for k in labels)
+            print(f"  {name:<8}{total:>5}음{cells}")
 
     exact = result["exact"]
     if not exact:
@@ -205,7 +259,8 @@ def report(truth_path: str, ours_path: str) -> None:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    if len(args) != 2:
         print(__doc__)
         sys.exit(1)
-    report(sys.argv[1], sys.argv[2])
+    report(args[0], args[1], by_register="--register" in sys.argv)

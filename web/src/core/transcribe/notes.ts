@@ -43,6 +43,18 @@ export interface PitchCurve {
   readonly f0: readonly number[];
   /** 프레임별 신뢰도 0~1. 없으면 f0>0을 그대로 믿는다 */
   readonly confidence?: readonly number[];
+  /**
+   * 옥타브 후보 f0(Hz). 사이드카의 옥타브 2패스가 싣는다 — 기준과 **정확히
+   * ±1옥타브** 관계인 프레임만 값이 있고 나머지는 0이다.
+   *
+   * 프레임 단위로는 어느 옥타브가 맞는지 가릴 수 없다는 것이 실측으로 확정됐다
+   * (confidence 분위수·제2모델·스펙트럼 에너지 셋 다 죽었다 —
+   * docs/고음_f0_미해결.md §3). 그래서 후보를 그대로 넘기고 **DP의 연속성이
+   * 프레이즈 단위로 고른다.** 없으면 예전과 완전히 같게 동작한다.
+   */
+  readonly f0Alt?: readonly number[];
+  /** 옥타브 후보의 신뢰도. `f0Alt`와 같은 길이 */
+  readonly confidenceAlt?: readonly number[];
 }
 
 export interface NoteEvent {
@@ -277,9 +289,11 @@ export function segmentNotes(
   if (frames === 0 || !(hopSec > 0)) return [];
 
   // 관측을 MIDI 소수로 옮긴다. 조율 보정은 여기서 한 번만 건다 —
-  // 뒤쪽에서 다시 걸면 두 번 밀린다.
+  // 뒤쪽에서 다시 걸면 두 번 밀린다. 옥타브 후보(f0Alt)에도 똑같이 한 번.
   const observed = new Float64Array(frames);
   const voiced = new Uint8Array(frames);
+  const altObserved = new Float64Array(frames);
+  const altVoiced = new Uint8Array(frames);
   for (let i = 0; i < frames; i += 1) {
     const hz = curve.f0[i];
     const ok =
@@ -291,9 +305,24 @@ export function segmentNotes(
     if (midi < MIN_MIDI - 1 || midi > MAX_MIDI + 1) continue;
     observed[i] = midi;
     voiced[i] = 1;
+
+    // 후보는 기준이 유성인 프레임에서만, 그리고 **정확히 ±1옥타브** 관계일
+    // 때만 받는다. f0.json은 외부 입력이므로 사이드카가 이미 거른 것을 믿지
+    // 않고 다시 확인한다 — 관계가 무너진 후보는 반주를 따라간 잡음이다.
+    const altHz = curve.f0Alt?.[i] ?? 0;
+    const altOk =
+      altHz > 0 &&
+      Number.isFinite(altHz) &&
+      (curve.confidenceAlt === undefined || curve.confidenceAlt[i] >= minConfidence);
+    if (!altOk) continue;
+    const altMidi = hzToMidi(altHz) - tuningCents / 100;
+    if (altMidi < MIN_MIDI - 1 || altMidi > MAX_MIDI + 1) continue;
+    if (Math.abs(Math.abs(altMidi - midi) - 12) > 0.5) continue;
+    altObserved[i] = altMidi;
+    altVoiced[i] = 1;
   }
 
-  const path = viterbiPitch(observed, voiced, switchCost(curve.hopMs));
+  const path = viterbiPitch(observed, voiced, altObserved, altVoiced, switchCost(curve.hopMs));
   const cuts = onset ? pickOnsets(onset, onsetStrength, curve.hopMs, frames) : [];
 
   // 같은 상태가 이어지는 구간이 곧 음표다. 상태 0은 무성이다.
@@ -314,10 +343,10 @@ export function segmentNotes(
       for (let c = cut; c < cuts.length && cuts[c] < i; c += 1) {
         const at = cuts[c];
         if (at - from < minFrames || i - at < minFrames) continue;
-        emit(notes, observed, voiced, hopSec, midi, from, at, minFrames);
+        emit(notes, observed, voiced, altObserved, altVoiced, hopSec, midi, from, at, minFrames);
         from = at;
       }
-      emit(notes, observed, voiced, hopSec, midi, from, i, minFrames);
+      emit(notes, observed, voiced, altObserved, altVoiced, hopSec, midi, from, i, minFrames);
     }
     start = i;
   }
@@ -338,6 +367,8 @@ function emit(
   notes: NoteEvent[],
   observed: Float64Array,
   voiced: Uint8Array,
+  altObserved: Float64Array,
+  altVoiced: Uint8Array,
   hopSec: number,
   midi: number,
   from: number,
@@ -350,7 +381,7 @@ function emit(
     startSec: from * hopSec,
     endSec: to * hopSec,
     velocity: DEFAULT_VELOCITY,
-    centsOffset: meanCents(observed, voiced, from, to, midi),
+    centsOffset: meanCents(observed, voiced, altObserved, altVoiced, from, to, midi),
   });
 }
 
@@ -429,6 +460,8 @@ function pickOnsets(
 function viterbiPitch(
   observed: Float64Array,
   voiced: Uint8Array,
+  altObserved: Float64Array,
+  altVoiced: Uint8Array,
   switchTo: number,
 ): Int16Array {
   const frames = observed.length;
@@ -456,14 +489,22 @@ function viterbiPitch(
     const switched = bestPrev + switchTo;
 
     for (let s = 0; s < states; s += 1) {
-      const local =
-        s === 0
-          ? voiced[t]
-            ? VOICED_MISMATCH
-            : 0
-          : voiced[t]
-            ? Math.min(Math.abs(observed[t] - (s - 1 + MIN_MIDI)), COST_CLAMP)
-            : UNVOICED_MISMATCH;
+      // 유성 프레임의 국소 비용은 **후보 중 가장 가까운 것**과의 거리다.
+      // 옥타브 후보가 있으면 그 상태(한 옥타브 위·아래)도 싸지고, 어느 쪽
+      // 프레이즈가 서는지는 전이 비용(연속성)이 정한다 — 프레임 단위 심판이
+      // 전부 죽은 뒤 남은 유일한 판정자다.
+      let local: number;
+      if (s === 0) {
+        local = voiced[t] ? VOICED_MISMATCH : 0;
+      } else if (!voiced[t]) {
+        local = UNVOICED_MISMATCH;
+      } else {
+        const pitch = s - 1 + MIN_MIDI;
+        local = Math.min(Math.abs(observed[t] - pitch), COST_CLAMP);
+        if (altVoiced[t]) {
+          local = Math.min(local, Math.abs(altObserved[t] - pitch));
+        }
+      }
 
       if (t === 0) {
         next[s] = local;
@@ -500,6 +541,8 @@ function viterbiPitch(
 function meanCents(
   observed: Float64Array,
   voiced: Uint8Array,
+  altObserved: Float64Array,
+  altVoiced: Uint8Array,
   from: number,
   to: number,
   midi: number,
@@ -508,7 +551,16 @@ function meanCents(
   let count = 0;
   for (let i = from; i < to; i += 1) {
     if (!voiced[i]) continue;
-    sum += (observed[i] - midi) * 100;
+    // DP가 이 음표를 옥타브 후보 쪽에 세웠다면 기준 관측은 12반음 밖이다 —
+    // 그대로 평균하면 centsOffset이 ±1200에 끌려간다. 프레임마다 음표에 더
+    // 가까운 후보를 고르고, 그래도 반옥타브 밖이면 그 프레임은 다른 가설의
+    // 것이므로 뺀다(`curve.ts`의 옥타브 스냅과 같은 경계값).
+    let value = observed[i];
+    if (altVoiced[i] && Math.abs(altObserved[i] - midi) < Math.abs(value - midi)) {
+      value = altObserved[i];
+    }
+    if (Math.abs(value - midi) > 6) continue;
+    sum += (value - midi) * 100;
     count += 1;
   }
   return count ? sum / count : 0;

@@ -213,6 +213,9 @@ def _pipeline(job: Job, source: Path, out_dir: Path) -> Path:
         vocal_path = None
 
     melody_engine: str | None = melody.ENGINE if has_melody else None
+    # 옥타브 2패스가 되올린 프레임 수. 커브를 새로 뽑을 때만 값이 선다 —
+    # 재사용 경로에서는 이번에 아무것도 안 했으므로 None이 정직하다.
+    octave_lifted: int | None = None
     if _f0_reusable(out_dir, previous, has_melody):
         report("멜로디 재사용", 0.78)
         has_melody = True
@@ -233,9 +236,13 @@ def _pipeline(job: Job, source: Path, out_dir: Path) -> Path:
                 # 분리가 고음 보컬의 기본음을 깎으면 f0가 아래 옥타브로 내려앉는데,
                 # 믹스에는 그 성분이 남아 있다. 유·무성만 위 커브에서 물려받는다.
                 # 스템이 없을 때는 두 커브가 같은 신호라 섞을 것이 없다.
-                report("멜로디 추출(원본 믹스)", 0.72)
-                curve = melody.merge_voicing(
-                    melody.extract_f0_from_samples(audio.samples, audio.rate), curve
+                # **한 옥타브 내려서도 한 번 더 물어본다**(`melody.pipeline_curve`).
+                # 고음은 8kHz 안에 배음이 8개뿐이라 ÷2 가설을 기각할 증거가 모자란데,
+                # 내려서 물으면 17개가 된다. 확실한 자리는 여기서 되올리고, 나머지는
+                # `f0Alt` 후보로 실어 웹의 노트 DP가 연속성으로 고르게 한다.
+                report("멜로디 추출(원본 믹스·옥타브)", 0.72)
+                curve, octave_lifted = melody.pipeline_curve(
+                    audio.samples, audio.rate, curve
                 )
         (out_dir / "f0.json").write_text(json.dumps(curve), encoding="utf-8")
 
@@ -276,6 +283,9 @@ def _pipeline(job: Job, source: Path, out_dir: Path) -> Path:
                 "stems": sorted(p.stem for p in (out_dir / "stems").glob("*.wav")),
                 # 이 결과를 만든 엔진들. 캐시 적중 판정이 이걸 본다(`create_job`)
                 "melodyEngine": melody_engine,
+                # 옥타브 2패스가 되올린 프레임 수. **이 장치의 효과를 나중에
+                # 분리해서 읽으려면 얼마나 발동했는지를 알아야 한다**(실측 0~3%).
+                "octaveLiftedFrames": octave_lifted,
                 # **실패해도 엔진 이름을 적는다.** 안 적으면 `_cache_hit`이
                 # "구조를 아직 안 돌렸다"로 읽고 곡을 열 때마다 파이프라인을
                 # 통째로 다시 돌린다 — 고쳐지지도 않을 실패를 위해서.

@@ -47,6 +47,15 @@ def main() -> None:
         default="",
         help="쉼표로 여러 개 (예: 0.01,0.03,0.1). 비우면 melody.MIN_CONFIDENCE 하나",
     )
+    parser.add_argument(
+        "--full",
+        action="store_true",
+        help=(
+            "앱과 같은 결선으로 뽑는다(`melody.pipeline_curve` — 믹스 음정 + 옥타브"
+            " 2패스 + f0Alt 후보 + 분리 보컬 마스크). 입력은 cache/<슬롯>/input.wav"
+            " 이어야 하고 같은 슬롯의 vocal_processed.wav를 마스크로 쓴다"
+        ),
+    )
     args = parser.parse_args()
 
     import soundfile as sf
@@ -62,6 +71,23 @@ def main() -> None:
             continue
         samples, rate = sf.read(str(path), dtype="float32", always_2d=True)
         started = time.monotonic()
+
+        if args.full:
+            voicing_path = path.parent / "vocal_processed.wav"
+            if not voicing_path.exists():
+                print(f"건너뜀 (vocal_processed.wav 없음): {path}", file=sys.stderr)
+                continue
+            voicing = melody.extract_f0(voicing_path)
+            curve, lifted = melody.pipeline_curve(samples.mean(axis=1), rate, voicing)
+            elapsed = time.monotonic() - started
+            target = args.out / f"{path.parent.name}-full.json"
+            target.write_text(json.dumps(curve), encoding="utf-8")
+            alt = sum(1 for v in curve["f0Alt"] if v > 0)
+            print(
+                f"{target.name}: {len(curve['f0'])}프레임 · 되올림 {lifted}"
+                f" · 후보 {alt} · {elapsed:.1f}s"
+            )
+            continue
         # 추론은 한 번. 문턱은 그 결과 위에서 갈린다.
         _t, frequency, confidence, _act = melody._load().predict(samples.mean(axis=1), rate)
         elapsed = time.monotonic() - started

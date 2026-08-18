@@ -162,6 +162,143 @@ def test_merge_stops_at_the_shorter_curve():
     assert merged["f0"] == [440.0, 440.0]
 
 
+# --- 옥타브 2패스 ------------------------------------------------------------
+#
+# **모델을 굴리지 않는다.** 여기서 보는 것은 판단 규칙이다 — 되돌리기 산수가
+# 맞는가, 조건을 다 채워야만 올리는가, 프레임 하나로 안 뒤집히는가.
+# 실제 정확도는 정답 MIDI가 말한다(`scripts/f0_truth.py`).
+
+
+def _spread(size, low, high):
+    """겹치지 않는 confidence 사다리. 분위수 순위가 뜻을 가지려면 값이 퍼져야 한다."""
+    return list(np.linspace(low, high, size))
+
+
+def test_restore_undoes_the_half_rate_trick():
+    """f0에 ×2, 프레임은 2칸마다 하나. 절반 속도로 물어본 것을 제자리로."""
+    lowered = {"hopMs": 10.0, "f0": [220.0, 999.0] * 4, "confidence": [0.5, 0.1] * 4}
+    restored = melody.restore_octave_curve(lowered)
+    assert restored["f0"] == [440.0] * 4  # ×2 되고, 홀수 프레임은 버려진다
+    assert restored["confidence"] == [0.5] * 4
+
+
+def test_octave_pass_lifts_a_halved_run():
+    """정확히 한 옥타브 아래로 깔렸고, 기준은 자신 없고 2패스는 자신 있다.
+
+    **분위수는 상대적이라** 두 confidence를 같은 방향으로 주면 조건이 겹치지
+    않는다(기준의 하위 60%와 2패스의 상위 40%가 같은 프레임이어야 한다).
+    그래서 반대 방향으로 준다 — 뒤로 갈수록 기준은 자신을 잃고 2패스는 얻는다.
+    """
+    size = 40
+    base = {"hopMs": 10.0, "f0": [440.0] * size, "confidence": _spread(size, 0.2, 0.05)}
+    lowered = {
+        "hopMs": 10.0,
+        "f0": [440.0] * (size * 2),
+        "confidence": _spread(size * 2, 0.7, 0.95),
+    }
+    fixed, lifted = melody.resolve_octave_pass(base, lowered)
+    assert lifted >= 10
+    assert fixed["f0"][-1] == pytest.approx(880.0)  # 조건이 가장 잘 맞는 끝쪽
+    assert fixed["f0"][0] == pytest.approx(440.0)  # 기준이 자신 있던 앞쪽은 그대로
+
+
+def test_octave_pass_leaves_a_confident_base_alone():
+    """기준 패스가 자기 기준으로 자신 있으면 건드리지 않는다.
+
+    이 조건이 없으면 맞게 잡은 저역까지 한 옥타브 위로 밀려 올라간다
+    (실측: 조건 없이 전체 교체하면 곡 넷에서 전체 정확률이 내려갔다).
+    """
+    size = 40
+    base = {"hopMs": 10.0, "f0": [440.0] * size, "confidence": _spread(size, 0.8, 0.99)}
+    lowered = {
+        "hopMs": 10.0,
+        "f0": [440.0] * (size * 2),
+        "confidence": _spread(size * 2, 0.8, 0.99),
+    }
+    _fixed, lifted = melody.resolve_octave_pass(base, lowered)
+    assert lifted == 0
+
+
+def test_octave_pass_ignores_gaps_that_are_not_an_octave():
+    """5도 차이는 옥타브 오류가 아니다 — 둘 중 하나가 그냥 틀린 것이다."""
+    size = 40
+    base = {"hopMs": 10.0, "f0": [440.0] * size, "confidence": _spread(size, 0.05, 0.2)}
+    lowered = {
+        "hopMs": 10.0,
+        "f0": [330.0] * (size * 2),  # ×2 하면 660Hz = 5도 위
+        "confidence": _spread(size * 2, 0.7, 0.95),
+    }
+    _fixed, lifted = melody.resolve_octave_pass(base, lowered)
+    assert lifted == 0
+
+
+def test_octave_pass_does_not_flip_on_a_single_frame():
+    """다수결 창. 한 프레임짜리 주장으로 옥타브를 바꾸지 않는다."""
+    size = 40
+    f0 = [440.0] * size
+    lowered_f0 = [220.0] * (size * 2)
+    lowered_f0[20] = 440.0  # 되돌리면 880 — 딱 한 프레임만 옥타브를 주장한다
+    base = {"hopMs": 10.0, "f0": f0, "confidence": _spread(size, 0.05, 0.2)}
+    lowered = {
+        "hopMs": 10.0,
+        "f0": lowered_f0,
+        "confidence": _spread(size * 2, 0.7, 0.95),
+    }
+    _fixed, lifted = melody.resolve_octave_pass(base, lowered)
+    assert lifted == 0
+
+
+def test_octave_pass_survives_mismatched_lengths():
+    """두 패스의 길이가 딱 두 배가 아닐 수 있다. 짧은 쪽에서 끝낸다."""
+    base = {"hopMs": 10.0, "f0": [440.0] * 10, "confidence": [0.1] * 10}
+    lowered = {"hopMs": 10.0, "f0": [220.0] * 7, "confidence": [0.9] * 7}
+    fixed, _lifted = melody.resolve_octave_pass(base, lowered)
+    assert len(fixed["f0"]) == 3  # 7 // 2 = 3
+
+
+def test_octave_pass_on_empty_curves():
+    empty = {"hopMs": 10.0, "f0": [], "confidence": []}
+    fixed, lifted = melody.resolve_octave_pass(empty, empty)
+    assert fixed["f0"] == [] and lifted == 0
+
+
+def test_octave_candidate_keeps_only_octave_relation():
+    """기준과 정확히 ±1옥타브인 프레임만 후보로 남는다.
+
+    같은 값은 후보로서 무의미하고, 5도처럼 옥타브가 아닌 차이는 2패스가 반주를
+    따라간 잡음이다 — 웹의 노트 DP에 넘길 신호는 옥타브 분쟁뿐이다.
+    """
+    base = {"hopMs": 10.0, "f0": [440.0, 440.0, 440.0, 0.0], "confidence": [0.5] * 4}
+    # 되돌리기(×2, [::2]) 후: [880(옥타브 위), 440(같음), 660(5도), 220]
+    lowered = {
+        "hopMs": 10.0,
+        "f0": [440.0, 440.0, 220.0, 220.0, 330.0, 330.0, 110.0, 110.0],
+        "confidence": [0.9] * 8,
+    }
+    alt = melody.octave_candidate(base, lowered)
+    assert alt["f0"][0] == pytest.approx(880.0)  # +12 — 남는다
+    assert alt["f0"][1] == 0.0  # 같음 — 비운다
+    assert alt["f0"][2] == 0.0  # 5도 — 잡음
+    assert alt["f0"][3] == 0.0  # 기준 무성 — 관계를 잴 수 없다
+
+
+def test_pipeline_curve_carries_masked_alt(monkeypatch):
+    """f0Alt에도 같은 유·무성 마스크가 걸리고 길이가 기준과 같다."""
+
+    def fake_extract(samples, rate, min_confidence=melody.MIN_CONFIDENCE):
+        if rate == 100:  # 기준 패스
+            return {"hopMs": 10.0, "f0": [440.0] * 6, "confidence": [0.9] * 6}
+        # 옥타브 패스(rate//2) — 되돌리면 880이 되는 값
+        return {"hopMs": 10.0, "f0": [440.0] * 12, "confidence": [0.9] * 12}
+
+    monkeypatch.setattr(melody, "extract_f0_from_samples", fake_extract)
+    voicing = {"hopMs": 10.0, "f0": [220.0, 220.0, 0.0, 220.0, 220.0, 220.0], "confidence": [0.5] * 6}
+    curve, _lifted = melody.pipeline_curve(np.zeros(600, dtype=np.float32), 100, voicing)
+    assert len(curve["f0Alt"]) == len(curve["f0"])
+    assert curve["f0"][2] == 0.0 and curve["f0Alt"][2] == 0.0  # 마스크가 둘 다 지운다
+    assert curve["f0Alt"][0] == pytest.approx(880.0)  # 후보가 실린다
+
+
 def test_silent_curve_matches_duration():
     audio = Audio(samples=sine(2.0, 440.0), rate=RATE)
     curve = melody.silent_curve(audio)
