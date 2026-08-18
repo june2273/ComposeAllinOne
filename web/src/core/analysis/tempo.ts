@@ -213,8 +213,15 @@ export function trackBeats(
 
 /** 2배 후보가 최고 후보의 이 비율은 되어야 배수 다툼으로 본다 */
 const OCTAVE_RIVAL = 0.7;
-/** 반박 자리가 비트 자리의 이 비율을 넘으면 "반박도 비트"로 의심한다 */
-const HALF_BEAT_STRONG = 0.4;
+/**
+ * 반박 자리가 비트 자리의 이 비율을 넘으면 "반박도 비트"로 의심한다.
+ *
+ * **템포를 두 배로 올리는 모든 경로가 이 문턱을 지나야 한다.** `index.ts`의
+ * `resolveDupleMeter`도 쓰므로 export한다 — 두 경로가 서로 다른 기준으로
+ * 배증하면 한쪽만 고쳐도 다른 쪽으로 같은 오류가 새어 나온다(실측: 실제로
+ * 그렇게 샜다. `resolveDupleMeter` 주석 참조).
+ */
+export const HALF_BEAT_STRONG = 0.4;
 /** 2배로 갈아탄 뒤 반박 대비가 이 배수 이하로 좋아져야 실제로 갈아탄다 */
 const OCTAVE_IMPROVE = 0.75;
 

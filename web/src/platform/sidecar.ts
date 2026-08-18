@@ -15,6 +15,7 @@
  * 포트 대신 IPC가 되지만, 위층이 보는 `analyzeWithSidecar`의 모양은 같다.
  */
 
+import type { RawSegment } from "../core/analysis";
 import type { PitchCurve } from "../core/transcribe";
 
 /** 서버의 기본 포트. `server/app/main.py`의 DEFAULT_PORT와 같아야 한다 */
@@ -41,8 +42,12 @@ export interface SidecarHealth {
   readonly version: string;
   /** "mps" · "cuda" · "cpu" */
   readonly device: string;
-  /** 지금 쓸 수 있는가 */
-  readonly models: { readonly stems: boolean; readonly melody: boolean };
+  /** 지금 쓸 수 있는가. **`structure`는 없을 수 있다**(옛 서버) */
+  readonly models: {
+    readonly stems: boolean;
+    readonly melody: boolean;
+    readonly structure?: boolean;
+  };
   /**
    * 왜 못 쓰는가. **없을 수도 있다** — 자가진단이 들어오기 전 버전의 서버가
    * 그 포트에 떠 있을 수 있으므로 옵셔널로 둔다.
@@ -50,7 +55,25 @@ export interface SidecarHealth {
   readonly checks?: {
     readonly stems?: SidecarCheck;
     readonly melody?: SidecarCheck;
+    readonly structure?: SidecarCheck;
   };
+}
+
+/**
+ * 구조 분석기가 낸 것 **그대로**. 마디로 옮기고 라벨을 다시 붙이는 것은
+ * `core/analysis/sections.ts`가 한다 — 여기는 HTTP만 안다.
+ *
+ * `bpm`·`downbeats`는 우리 것을 대체하지 않는다. 양자화 격자가 전부 브라우저의
+ * `track.beats` 위에 얹혀 있어 교체는 별개 작업이고, 지금은 **다른 읽기**로
+ * 나란히 보여줄 뿐이다.
+ */
+export interface SidecarStructure {
+  readonly engine: string;
+  readonly bpm: number | null;
+  readonly beats: readonly number[];
+  readonly downbeats: readonly number[];
+  readonly beatPositions: readonly number[];
+  readonly segments: readonly RawSegment[];
 }
 
 export interface SidecarProgress {
@@ -65,6 +88,8 @@ export interface SidecarResult {
   readonly stems: readonly string[];
   readonly hasStems: boolean;
   readonly hasMelody: boolean;
+  /** **없을 수 있다** — 모델이 없거나, 구조가 들어오기 전에 만든 캐시 슬롯이다 */
+  readonly structure: SidecarStructure | null;
   readonly durationSec: number;
 }
 
@@ -155,7 +180,7 @@ export async function analyzeWithSidecar(
     throw failure;
   }
 
-  const [curve, meta] = await Promise.all([
+  const [curve, meta, structure] = await Promise.all([
     json<PitchCurve>(get, `${url}/jobs/${jobId}/f0`, signal),
     json<{
       durationSec: number;
@@ -163,6 +188,9 @@ export async function analyzeWithSidecar(
       hasMelody: boolean;
       stems: string[];
     }>(get, `${url}/jobs/${jobId}/meta`, signal),
+    // **없는 것이 정상 상태 중 하나다.** 구조 모델이 없거나, 구조가 들어오기
+    // 전에 만든 캐시 슬롯이면 404다 — 그것 때문에 전사 결과까지 버릴 이유가 없다.
+    optional<SidecarStructure>(get, `${url}/jobs/${jobId}/structure`, signal),
   ]);
 
   return {
@@ -171,8 +199,26 @@ export async function analyzeWithSidecar(
     stems: meta.stems,
     hasStems: meta.hasStems,
     hasMelody: meta.hasMelody,
+    structure,
     durationSec: meta.durationSec,
   };
+}
+
+/** 있으면 주고 없으면 `null`. 네트워크가 아니라 **없음**을 표현한다 */
+async function optional<T>(
+  get: typeof fetch,
+  url: string,
+  signal?: AbortSignal,
+): Promise<T | null> {
+  try {
+    const response = await get(url, { signal });
+    if (!response.ok) return null;
+    return (await response.json()) as T;
+  } catch (failure) {
+    // 중단은 중단이다 — 조용히 null로 삼키면 화면을 떠난 뒤에도 계속 그린다
+    if (signal?.aborted) throw failure;
+    return null;
+  }
 }
 
 async function json<T>(

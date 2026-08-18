@@ -13,6 +13,7 @@
     python scripts/evalset.py list
     python scripts/evalset.py scan [--root DIR]...
     python scripts/evalset.py truth <곡.svp|곡.mid> --slot <slot>
+    python scripts/evalset.py sections --slot <slot>
 
 **`scan`은 사람이 적은 것을 덮어쓰지 않는다.** `name`·`truth`·`note`는 한 번
 채워지면 그대로 두고, 비어 있는 칸과 기계가 아는 값(`durationSec`·`source`)만
@@ -333,6 +334,11 @@ def cmd_truth(args: argparse.Namespace) -> int:
     # 적으면 표를 그리는 도구마다 MIDI를 다시 파싱하게 된다 — 실제로 그러다
     # 러닝 스테이터스를 놓쳐 세 곡이 나란히 58개씩 모자란 적이 있다.
     song["truthNotes"] = len(notes)
+    # **BPM도 같은 이유로 적는다.** 여기서는 이미 손에 쥔 값인데 안 적으면
+    # 템포를 재는 도구가 truth MIDI의 `set_tempo`를 도로 파싱해야 한다.
+    # 그리고 이 값이 없으면 **배수 오류를 아예 잴 수 없다** — 우리 BPM이
+    # 정답의 두 배인지 절반인지 대조할 상대가 없기 때문이다.
+    song["truthBpm"] = round(bpm, 3)
     save_songs(list(songs.values()))
     print(f"{len(notes)}음 · {bpm:g} BPM → {out}")
     return 0
@@ -368,6 +374,70 @@ def cmd_list(args: argparse.Namespace) -> int:
     return 0
 
 
+#: 구조 정답에 쓸 수 있는 라벨. `core/analysis/sections.ts`의 `SectionLabel`과
+#: 같아야 한다 — 다르면 `eval_structure.py`가 전부 오답으로 센다.
+SECTION_LABELS = (
+    "intro", "verse", "pre-chorus", "chorus",
+    "bridge", "inst", "solo", "break", "outro",
+)
+
+
+def cmd_sections(args: argparse.Namespace) -> int:
+    """구조 정답의 **초안**을 굽는다. 사람이 고쳐서 정답으로 삼는다.
+
+    맨바닥에서 시각을 찍는 것보다 앱이 낸 것을 고치는 편이 훨씬 싸다 — 격자
+    MIDI를 DAW에서 고쳐 정답으로 삼는 기존 방침과 같다. **초안이 곧 정답이
+    아니라는 것이 요점이다**: 우리 결과로 우리를 채점하면 아무것도 못 잰다.
+    """
+    slot_dir = CACHE_DIR / args.slot
+    source = slot_dir / "structure.json"
+    if not source.exists():
+        print(f"구조 분석 결과가 없다: {source}", file=sys.stderr)
+        print("앱(또는 사이드카)에 그 곡을 한 번 올려야 한다.", file=sys.stderr)
+        return 1
+
+    raw = json.loads(source.read_text(encoding="utf-8"))
+    meta_path = slot_dir / "meta.json"
+    duration = 0.0
+    if meta_path.exists():
+        duration = float(json.loads(meta_path.read_text(encoding="utf-8")).get("durationSec") or 0)
+
+    songs = {s["slot"]: s for s in load_songs()}
+    name = args.name or (songs.get(args.slot) or {}).get("name") or args.slot
+
+    sections = [
+        {"time": round(float(seg["start"]), 2), "label": seg["label"]}
+        for seg in raw.get("segments", [])
+        if seg.get("label") not in {"start", "end"}
+    ]
+    if duration:
+        sections.append({"time": round(duration, 2), "label": "end"})
+
+    out = EVALSET_DIR / "truth" / f"{name}.sections.json"
+    if out.exists() and not args.force:
+        print(f"이미 있다(덮어쓰려면 --force): {out}", file=sys.stderr)
+        return 1
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(
+        json.dumps(
+            {
+                "song": name,
+                "slot": args.slot,
+                "annotated": None,
+                "note": "초안이다. 시각과 라벨을 손으로 고친 뒤 annotated에 날짜를 적을 것",
+                "labels": list(SECTION_LABELS),
+                "sections": sections,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    print(f"{out} — {len(sections)}줄. 고친 뒤 songs.json의 structure에 경로를 적을 것")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -382,6 +452,12 @@ def main(argv: list[str] | None = None) -> int:
     p_truth.add_argument("--name", help="파일 이름 (기본: songs.json의 곡 이름)")
     p_truth.add_argument("--track", help="화음 성부가 있을 때 고를 멜로디 트랙의 번호나 이름")
     p_truth.set_defaults(func=cmd_truth)
+
+    p_sections = sub.add_parser("sections", help="구조 정답의 초안을 굽는다")
+    p_sections.add_argument("--slot", required=True, help="캐시 슬롯")
+    p_sections.add_argument("--name", help="파일 이름 (기본: songs.json의 곡 이름)")
+    p_sections.add_argument("--force", action="store_true", help="이미 있어도 덮어쓴다")
+    p_sections.set_defaults(func=cmd_sections)
 
     p_list = sub.add_parser("list", help="목록을 표로 보여준다")
     p_list.set_defaults(func=cmd_list)

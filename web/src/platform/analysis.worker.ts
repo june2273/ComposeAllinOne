@@ -17,6 +17,8 @@ interface Request {
   job?: "analyze" | "onset";
   samples: Float32Array;
   sampleRate: number;
+  /** 사용자가 템포 후보를 직접 골랐을 때만 온다. `job: "analyze"`에서만 쓴다 */
+  forceBpm?: number;
 }
 
 const scope = self as unknown as {
@@ -25,15 +27,18 @@ const scope = self as unknown as {
 };
 
 scope.onmessage = (event: MessageEvent) => {
-  const { job, samples, sampleRate } = event.data as Request;
+  const { job, samples, sampleRate, forceBpm } = event.data as Request;
   try {
     if (job === "onset") {
       // 보컬 스템의 온셋. 전사의 노트 분할이 쓴다 — 진행률은 없다(수백 ms다)
       scope.postMessage({ type: "onset", curve: extractOnsetCurve(samples, sampleRate) });
       return;
     }
-    const report = analyzeAudio(samples, sampleRate, (progress) =>
-      scope.postMessage({ type: "progress", ...progress }),
+    const report = analyzeAudio(
+      samples,
+      sampleRate,
+      (progress) => scope.postMessage({ type: "progress", ...progress }),
+      { forceBpm },
     );
     scope.postMessage({ type: "done", report });
   } catch (error) {

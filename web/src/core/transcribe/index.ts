@@ -3,8 +3,14 @@
  *
  * ```
  * f0 커브 ──[notes]── 음표 ──[quantize]── 격자 음표 ──┬─[midi]──── .mid
- *   (사이드카)                (비트 그리드)            └─[musicxml]─ 악보
+ *   (사이드카)   │            (비트 그리드)            └─[musicxml]─ 악보
+ *               └──[curve]── 컨트롤 점 ──[svp]──────────────────── .svp
  * ```
+ *
+ * 아래 갈래가 **커브를 산출물로 내보내는 길**이다(2026-08-12). 위 갈래는 커브에서
+ * 음표만 뽑고 비브라토·포르타멘토를 버리는데, 가창 합성기에 음표만 주면 합성기의
+ * AI가 자기 피치 커브를 새로 만들어 붙인다 — **원 보컬이 어떻게 불렀는지가 한
+ * 톨도 남지 않는다.** 두 갈래는 같은 커브를 보되 서로를 import하지 않는다.
  *
  * ## 이 층이 지키는 것
  *
@@ -39,6 +45,7 @@ import {
   type Grid,
   type OffsetCurve,
   type QuantizedNote,
+  nearestStep,
   quantizeNotes,
 } from "./quantize";
 import { keyFifths, toMusicXml } from "./musicxml";
@@ -66,13 +73,19 @@ export {
   estimateOffsetCurve,
   estimateOffsetMs,
   metricalCost,
+  nearestStep,
   offsetAtMs,
   quantizeNotes,
+  stepAtTime,
   stepTime,
   STEPS_PER_BEAT,
 } from "./quantize";
 export { fromNotes, fromQuantized, writeVarLen, TICKS_PER_BEAT } from "./midi";
-export type { Fifths, ScoreOptions } from "./musicxml";
+export type { PitchPoint, PitchTrack, PitchTrackOptions } from "./curve";
+export { buildPitchTrack } from "./curve";
+export type { SvpInput, SvpOptions } from "./svp";
+export { toSvp, BLICKS_PER_QUARTER } from "./svp";
+export type { Fifths, HarmonyMark, ScoreOptions } from "./musicxml";
 export {
   keyAlter,
   keyFifths,
@@ -115,6 +128,20 @@ export interface TranscribeContext {
   /** 조표 계산용 */
   readonly key?: { readonly tonic: number; readonly mode: "major" | "minor" };
   readonly title?: string;
+  /**
+   * 악보에 얹을 코드. **초 단위로 받는다** — 격자 칸으로 옮기는 것은 여기서
+   * 한다(`buildGrid` 뒤에). 호출부가 자기 격자를 짐작해서 칸 번호를 계산하면
+   * 그 순간 두 격자가 갈리고, 코드가 음표와 다른 자리에 앉는다.
+   *
+   * `analysis.ChordEvent`와 **모양만 맞춘다** — 두 층은 서로를 import하지
+   * 않는다(`OnsetCurve`와 같은 방식).
+   */
+  readonly chords?: readonly {
+    readonly atSec: number;
+    readonly root: number;
+    readonly kind: string;
+    readonly text: string;
+  }[];
 }
 
 export interface Transcription {
@@ -132,6 +159,16 @@ export interface Transcription {
    */
   readonly vocalXml: string;
   readonly fifths: number;
+  /**
+   * **원본 f0 커브를 그대로 들고 있는다.**
+   *
+   * 사양서 §1.8·§9의 "f0가 원재료, 노트는 그 양자화 결과"를 타입으로 지킨 것이다.
+   * 예전에는 `transcribe()`가 커브를 인자로만 받고 결과에 안 실어서, 비브라토·
+   * 포르타멘토를 되찾으려면 호출부가 커브를 따로 들고 다녀야 했다 — 그러면
+   * **어느 조율값으로 자른 커브인지가 갈릴 수 있다.** 같은 객체에 `tuningCents`와
+   * 함께 두면 그 짝이 어긋날 자리가 없어진다.
+   */
+  readonly curve: PitchCurve;
   /**
    * 노래가 박에서 평균 얼마나 밀려 있었는가(밀리초, 양수면 늦음).
    *
@@ -180,6 +217,14 @@ export function transcribe(
   const fifths = context.key
     ? keyFifths(context.key.tonic, context.key.mode)
     : 0;
+  // 코드는 초로 들어와 여기서 격자 칸이 된다. **격자를 만든 뒤여야 한다**
+  const harmony = (context.chords ?? []).map((chord) => ({
+    step: nearestStep(grid, chord.atSec),
+    root: chord.root,
+    kind: chord.kind,
+    text: chord.text,
+  }));
+
   const scoreOptions = {
     beatsPerBar: grid.beatsPerBar,
     stepsPerBeat: grid.stepsPerBeat,
@@ -190,7 +235,10 @@ export function transcribe(
     key: context.key,
     title: context.title,
   };
-  const musicXml = toMusicXml(quantized, scoreOptions);
+  // **코드 심볼은 악보에만 얹는다.** `vocalXml`은 가창 합성기가 읽는 파일이고
+  // 거기서 코드 심볼은 쓰이지 않는다 — 화면 악보에 `la`를 안 거는 것과 같은
+  // 이유로, 파일마다 필요한 것만 넣는다.
+  const musicXml = toMusicXml(quantized, { ...scoreOptions, harmony });
   const vocalXml = toMusicXml(quantized, { ...scoreOptions, lyric: VOCAL_LYRIC });
 
   return {
@@ -200,6 +248,7 @@ export function transcribe(
     musicXml,
     vocalXml,
     fifths,
+    curve,
     offsetMs: offsetCurve.medianMs,
     offsetCurve,
     tuningCents,

@@ -27,10 +27,10 @@ from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
-from . import melody, stems
+from . import melody, stems, structure
 from .audio import process_vocal, read_audio, write_audio
 from .health import Probe
-from .jobs import Job, JobStore, digest_of
+from .jobs import Cancelled, Job, JobStore, digest_of
 
 VERSION = "0.1.0"
 
@@ -52,6 +52,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         {
             "stems": (stems.available, stems.selftest),
             "melody": (melody.available, melody.selftest),
+            "structure": (structure.available, structure.selftest),
         }
     )
     yield
@@ -85,8 +86,16 @@ def health() -> dict:
     `models.*`는 **지금 쓸 수 있는가**다. 진단 전에는 설치 여부로 낙관하고,
     진단이 끝나면 실제 결과로 바뀐다. 무엇이 왜 안 되는지는 `checks.*`에 있다.
     """
-    checks = {"stems": probe.get("stems"), "melody": probe.get("melody")}
-    installed = {"stems": stems.available, "melody": melody.available}
+    checks = {
+        "stems": probe.get("stems"),
+        "melody": probe.get("melody"),
+        "structure": probe.get("structure"),
+    }
+    installed = {
+        "stems": stems.available,
+        "melody": melody.available,
+        "structure": structure.available,
+    }
     return {
         "ok": True,
         "version": VERSION,
@@ -141,11 +150,41 @@ def _stem_paths(out_dir: Path, duration: float | None = None) -> dict[str, Path]
     return paths
 
 
+def _read_meta(out_dir: Path) -> dict:
+    """앞선 실행이 남긴 메타. 없거나 깨졌으면 빈 표다."""
+    try:
+        return json.loads((out_dir / "meta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _f0_reusable(out_dir: Path, meta: dict, has_melody: bool) -> bool:
+    """이미 뽑아 둔 f0를 그대로 써도 되는가.
+
+    **스템 재사용과 같은 취지지만 이유가 하나 더 있다.** 구조 엔진만 바뀌어
+    캐시가 미스가 됐을 때 RMVPE를 다시 돌릴 이유가 없다 — 그게 없으면 이
+    무효화가 "고쳤다"가 아니라 "곡마다 멜로디를 몇 분씩 다시 뽑는다"가 된다
+    (`_stem_paths` 주석과 같은 함정이다).
+
+    **지금 모델이 없어졌어도 이미 있는 좋은 커브는 지우지 않는다.** 안 그러면
+    구조 때문에 다시 돈 김에 멀쩡한 f0가 무성 커브로 덮인다.
+    """
+    if not (out_dir / "f0.json").exists() or not (out_dir / "vocal_processed.wav").exists():
+        return False
+    if not meta.get("hasMelody"):
+        return False
+    if not has_melody:
+        return True
+    return meta.get("melodyEngine") == melody.ENGINE
+
+
 def _pipeline(job: Job, source: Path, out_dir: Path) -> Path:
-    """분리 → 후처리 → f0. 진행률의 배분은 실측 비율에 맞춘 어림값이다."""
+    """분리 → 후처리 → f0 → 구조. 진행률의 배분은 실측 비율에 맞춘 어림값이다."""
     report = store.progress(job)
     has_stems = _usable("stems", stems.available)
     has_melody = _usable("melody", melody.available)
+    has_structure = _usable("structure", structure.available)
+    previous = _read_meta(out_dir)
 
     report("파일 읽는 중", 0.02)
     audio = read_audio(source)
@@ -159,13 +198,13 @@ def _pipeline(job: Job, source: Path, out_dir: Path) -> Path:
         # f0뿐이다. 분리는 끝났는데 f0를 쓰기 전에 서버가 죽은 경우도 여기서 산다.
         paths = _stem_paths(out_dir, audio.duration)
         if paths:
-            report("스템 재사용", 0.80)
+            report("스템 재사용", 0.58)
         else:
             paths = stems.separate(
                 audio,
                 stem_dir,
-                # 분리가 전체의 앞 80%를 차지한다고 본다
-                progress=lambda stage, ratio: report(stage, 0.05 + ratio * 0.75),
+                # 분리가 전체의 앞 55%를 차지한다고 본다
+                progress=lambda stage, ratio: report(stage, 0.05 + ratio * 0.53),
             )
         vocal_path = paths.get("vocals")
     else:
@@ -173,26 +212,59 @@ def _pipeline(job: Job, source: Path, out_dir: Path) -> Path:
         # **파이프라인이 끝까지 도는 것**이 진단에 훨씬 쓸모 있다.
         vocal_path = None
 
-    report("보컬 후처리", 0.82)
-    raw = read_audio(vocal_path) if vocal_path else audio
-    processed = process_vocal(raw)
-    processed_path = out_dir / "vocal_processed.wav"
-    write_audio(processed_path, processed)
+    melody_engine: str | None = melody.ENGINE if has_melody else None
+    if _f0_reusable(out_dir, previous, has_melody):
+        report("멜로디 재사용", 0.78)
+        has_melody = True
+        melody_engine = previous.get("melodyEngine")
+    else:
+        report("보컬 후처리", 0.60)
+        raw = read_audio(vocal_path) if vocal_path else audio
+        processed = process_vocal(raw)
+        processed_path = out_dir / "vocal_processed.wav"
+        write_audio(processed_path, processed)
 
-    report("멜로디 추출", 0.88)
-    curve = melody.silent_curve(processed)
-    if has_melody:
-        curve = melody.extract_f0(processed_path)
-        if vocal_path is not None:
-            # **음정은 원본 믹스에서 다시 뽑아 덮는다**(`melody.merge_voicing`).
-            # 분리가 고음 보컬의 기본음을 깎으면 f0가 아래 옥타브로 내려앉는데,
-            # 믹스에는 그 성분이 남아 있다. 유·무성만 위 커브에서 물려받는다.
-            # 스템이 없을 때는 두 커브가 같은 신호라 섞을 것이 없다.
-            report("멜로디 추출(원본 믹스)", 0.94)
-            curve = melody.merge_voicing(
-                melody.extract_f0_from_samples(audio.samples, audio.rate), curve
+        report("멜로디 추출", 0.65)
+        curve = melody.silent_curve(processed)
+        if has_melody:
+            curve = melody.extract_f0(processed_path)
+            if vocal_path is not None:
+                # **음정은 원본 믹스에서 다시 뽑아 덮는다**(`melody.merge_voicing`).
+                # 분리가 고음 보컬의 기본음을 깎으면 f0가 아래 옥타브로 내려앉는데,
+                # 믹스에는 그 성분이 남아 있다. 유·무성만 위 커브에서 물려받는다.
+                # 스템이 없을 때는 두 커브가 같은 신호라 섞을 것이 없다.
+                report("멜로디 추출(원본 믹스)", 0.72)
+                curve = melody.merge_voicing(
+                    melody.extract_f0_from_samples(audio.samples, audio.rate), curve
+                )
+        (out_dir / "f0.json").write_text(json.dumps(curve), encoding="utf-8")
+
+    structure_error: str | None = None
+    if has_structure:
+        report("구조 분석", 0.80)
+        try:
+            structure.write(
+                structure.analyze(
+                    source,
+                    out_dir / "allin1",
+                    progress=lambda stage, ratio: report(stage, 0.80 + ratio * 0.17),
+                ),
+                out_dir,
             )
-    (out_dir / "f0.json").write_text(json.dumps(curve), encoding="utf-8")
+        except Cancelled:
+            # **취소는 실패가 아니다.** 이걸 아래 `except`가 삼키면 사용자가 취소를
+            # 눌렀는데 작업이 "완료"로 끝나고, 게다가 그 반쪽짜리 결과가 캐시에
+            # 등록된다(실측 2026-08-14: `structureError: "Cancelled: "`가 적힌 슬롯이
+            # 남았고, `structureEngine`까지 적혀 그 곡은 영영 구조를 못 받게 됐다).
+            # 진행률 보고가 곧 중단 지점이라는 규칙이 여기서만 깨져 있었다.
+            raise
+        except Exception as failure:  # noqa: BLE001 — 이것 때문에 앞의 결과를 버리지 않는다
+            # **여기서 던지면 수 분짜리 분리와 f0가 함께 죽는다.** 구조는 맨 뒤에
+            # 붙은 덧붙임이므로 실패해도 나머지는 그대로 내보낸다 — `_usable`이
+            # `broken` 모델을 애초에 안 부르는 것과 같은 취지이고, 여기는 그것이
+            # 못 잡는 실행 중 실패를 받는다. 무엇이 터졌는지는 메타에 남는다.
+            structure_error = f"{type(failure).__name__}: {failure}"
+            has_structure = False
 
     (out_dir / "meta.json").write_text(
         json.dumps(
@@ -200,9 +272,17 @@ def _pipeline(job: Job, source: Path, out_dir: Path) -> Path:
                 "durationSec": round(audio.duration, 3),
                 "hasStems": has_stems,
                 "hasMelody": has_melody,
+                "hasStructure": has_structure,
                 "stems": sorted(p.stem for p in (out_dir / "stems").glob("*.wav")),
-                # 이 커브를 만든 엔진. 캐시 적중 판정이 이걸 본다(`create_job`)
-                "melodyEngine": melody.ENGINE if has_melody else None,
+                # 이 결과를 만든 엔진들. 캐시 적중 판정이 이걸 본다(`create_job`)
+                "melodyEngine": melody_engine,
+                # **실패해도 엔진 이름을 적는다.** 안 적으면 `_cache_hit`이
+                # "구조를 아직 안 돌렸다"로 읽고 곡을 열 때마다 파이프라인을
+                # 통째로 다시 돌린다 — 고쳐지지도 않을 실패를 위해서.
+                "structureEngine": (
+                    structure.ENGINE if has_structure or structure_error else None
+                ),
+                "structureError": structure_error,
             }
         ),
         encoding="utf-8",
@@ -245,6 +325,12 @@ def _cache_hit(out_dir: Path) -> bool:
         return False
     if meta.get("hasMelody") and meta.get("melodyEngine") != melody.ENGINE:
         return False
+    # **구조도 같은 규칙이다.** 다만 판정을 `hasStructure`가 아니라 엔진 이름으로
+    # 한다 — 이 파일에서 구조 분석이 터진 적이 있으면 `hasStructure`가 False인
+    # 채로 엔진만 적혀 있고, 그때 다시 돌려 봐야 같은 곳에서 같은 이유로 죽는다.
+    if _usable("structure", structure.available):
+        if meta.get("structureEngine") != structure.ENGINE:
+            return False
     return True
 
 
@@ -299,6 +385,18 @@ def job_f0(job_id: str) -> JSONResponse:
     path = _finished(job_id) / "f0.json"
     if not path.exists():
         raise HTTPException(status_code=404, detail="f0가 없습니다")
+    return JSONResponse(json.loads(path.read_text(encoding="utf-8")))
+
+
+@app.get("/jobs/{job_id}/structure")
+def job_structure(job_id: str) -> JSONResponse:
+    """구간·비트·다운비트. **없을 수 있다** — 모델이 없거나 옛 캐시 슬롯이다.
+
+    웹은 404를 오류가 아니라 "구조 없음"으로 읽는다(`platform/sidecar.ts`).
+    """
+    path = _finished(job_id) / "structure.json"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="구조 분석 결과가 없습니다")
     return JSONResponse(json.loads(path.read_text(encoding="utf-8")))
 
 

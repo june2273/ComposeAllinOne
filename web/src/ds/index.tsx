@@ -360,6 +360,8 @@ export interface ShareBarsProps {
   rows: readonly ShareRow[];
   /** 표 위 제목 */
   caption?: string;
+  /** 주면 행이 버튼이 된다 — 후보를 눌러서 고르는 화면에 쓴다 */
+  onSelect?: (index: number) => void;
 }
 
 /**
@@ -378,34 +380,48 @@ export interface ShareBarsProps {
  * 함께 나간다. 모든 행이 이름과 백분율을 늘 달고 있어서 마우스를 올려야만
  * 보이는 정보가 없다(그래서 툴팁을 두지 않았다).
  */
-export function ShareBars({ rows, caption }: ShareBarsProps) {
+export function ShareBars({ rows, caption, onSelect }: ShareBarsProps) {
   return (
     <div className="shares">
       {caption && <div className="shares__caption">{caption}</div>}
-      {rows.map((row) => (
-        <div
-          key={row.label}
-          className={`shares__row${row.selected ? " shares__row--on" : ""}`}
-        >
-          <span className="shares__label">{row.label}</span>
-          <span className="shares__track">
-            <span
-              className="shares__fill"
-              style={{ width: `${Math.max(0, Math.min(1, row.value)) * 100}%` }}
-            />
-          </span>
-          <span className="shares__value">
-            {Math.round(row.value * 100)}%
-            {row.selected && (
-              <>
-                {" "}
-                <span aria-hidden="true">◂</span>
-                <span className="sr-only">선택됨</span>
-              </>
-            )}
-          </span>
-        </div>
-      ))}
+      {rows.map((row, index) => {
+        const className = `shares__row${row.selected ? " shares__row--on" : ""}${onSelect ? " shares__row--clickable" : ""}`;
+        const content = (
+          <>
+            <span className="shares__label">{row.label}</span>
+            <span className="shares__track">
+              <span
+                className="shares__fill"
+                style={{ width: `${Math.max(0, Math.min(1, row.value)) * 100}%` }}
+              />
+            </span>
+            <span className="shares__value">
+              {Math.round(row.value * 100)}%
+              {row.selected && (
+                <>
+                  {" "}
+                  <span aria-hidden="true">◂</span>
+                  <span className="sr-only">선택됨</span>
+                </>
+              )}
+            </span>
+          </>
+        );
+        return onSelect ? (
+          <button
+            key={row.label}
+            type="button"
+            className={className}
+            onClick={() => onSelect(index)}
+          >
+            {content}
+          </button>
+        ) : (
+          <div key={row.label} className={className}>
+            {content}
+          </div>
+        );
+      })}
     </div>
   );
 }

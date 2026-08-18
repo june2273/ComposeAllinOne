@@ -318,7 +318,7 @@ function candidatesFor(
   weight: number,
   fineBoost: number,
 ): { step: number; cost: number }[] {
-  const nearest = nearestIndex(grid.times, atSec) + grid.origin;
+  const nearest = nearestStep(grid, atSec);
   const span = Math.ceil(CANDIDATE_RADIUS);
   const out: { step: number; cost: number }[] = [];
   for (let d = -span; d <= span; d += 1) {
@@ -376,7 +376,7 @@ export function estimateOffsetMs(
       const at = note.startSec - offset / 1000;
       // 오프셋을 고르는 데에는 편차만 본다 — 박절 사전까지 넣으면 "전부 정박에
       // 몰아넣는 오프셋"이 이겨서 당김음 곡을 통째로 밀어버린다.
-      const nearest = nearestIndex(grid.times, at) + grid.origin;
+      const nearest = nearestStep(grid, at);
       total += deviationCost(grid, nearest, at);
     }
     if (total < bestCost) {
@@ -436,7 +436,7 @@ export function estimateOffsetCurve(
   const sampleAt: number[] = [];
   const sampleMs: number[] = [];
   for (const note of notes) {
-    const position = stepPosition(grid, note.startSec);
+    const position = stepAtTime(grid, note.startSec);
     const eighth = Math.round(position / perEighth) * perEighth;
     const deviation = (note.startSec - stepTime(grid, eighth)) * 1000;
     if (Math.abs(deviation) > DRIFT_TRIM * stepMs) continue;
@@ -649,6 +649,20 @@ function withDurations(
   });
 }
 
+/**
+ * 시각(초) → **가장 가까운** 칸 번호(정수).
+ *
+ * `stepAtTime`(아래)과 헷갈리지 말 것 — 그쪽은 칸 사이 어디쯤인지를 소수로
+ * 돌려준다. 여기는 반올림이라 "악보의 어느 자리인가"에 답한다. 드리프트를
+ * 재는 데 이걸 쓰면 재려던 편차가 반올림에 먹힌다.
+ *
+ * 격자 밖의 시각은 양 끝 칸으로 눌린다.
+ */
+export function nearestStep(grid: Grid, atSec: number): number {
+  if (!grid.times.length) return grid.origin;
+  return nearestIndex(grid.times, atSec) + grid.origin;
+}
+
 /** 칸 번호 → 시각(초). 격자 밖은 양 끝 간격을 연장한다. */
 export function stepTime(grid: Grid, step: number): number {
   const index = step - grid.origin;
@@ -671,8 +685,13 @@ export function stepTime(grid: Grid, step: number): number {
  *
  * 드리프트를 재려면 "몇 번 칸에 가까운가"가 아니라 "칸 사이 어디쯤인가"가
  * 필요하다 — 반올림해 버리면 재려던 편차가 사라진다.
+ *
+ * **밖으로 열어 둔 것은 `svp.ts` 때문이다.** 신스V의 시간 단위(blick)는 박에
+ * 매여 있어서 초를 그대로 쓸 수 없고, 피치 컨트롤 점을 옮기려면 이 사상이
+ * 필요하다. **두 벌을 만들면 안 된다** — 격자 안은 비트 사이 선형 보간이고
+ * 밖은 끝 간격 연장이라, 따로 구현하면 곡 끝에서 조용히 어긋난다.
  */
-function stepPosition(grid: Grid, at: number): number {
+export function stepAtTime(grid: Grid, at: number): number {
   const times = grid.times;
   if (times.length < 2) return grid.origin;
   const last = times.length - 1;

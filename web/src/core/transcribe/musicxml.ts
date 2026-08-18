@@ -22,6 +22,25 @@ import type { QuantizedNote } from "./quantize";
 /** 조표의 ♯/♭ 개수. 양수면 ♯계 */
 export type Fifths = number;
 
+/**
+ * 악보에 얹을 코드 심볼 하나.
+ *
+ * **`core/analysis`의 `ChordEvent`와 타입을 공유하지 않는다.** 두 층은 서로를
+ * import하지 않기로 되어 있어서(`extractOnsetCurve` ↔ `OnsetCurve`가 이미 쓰는
+ * 방식) **모양만 맞추고** 잇는 것은 위층의 일이다 — 여기서는
+ * `transcribe()`가 초를 격자 칸으로 옮기며 이 모양을 만든다.
+ */
+export interface HarmonyMark {
+  /** 격자 칸. `QuantizedNote.startStep`과 같은 단위다 */
+  readonly step: number;
+  /** 근음 음고류 0~11 */
+  readonly root: number;
+  /** MusicXML `<kind>` 값 — `"major"` · `"minor-seventh"` · `"dominant"` … */
+  readonly kind: string;
+  /** `<kind text="…">`. 근음 뒤에 붙어 보이는 글자 — `""` · `"m7"` · `"7"` */
+  readonly text: string;
+}
+
 export interface ScoreOptions {
   readonly beatsPerBar: number;
   readonly stepsPerBeat: number;
@@ -58,6 +77,14 @@ export interface ScoreOptions {
    * 여러 음에 걸쳐 늘이는 자리다).
    */
   readonly lyric?: string;
+  /**
+   * 코드 심볼. 오선 위에 `C` · `Am7`처럼 나간다.
+   *
+   * **시간을 소비하지 않는다** — `<harmony>`는 `<note>` 사이에 끼워 넣는
+   * 표시일 뿐이라 마디의 `<duration>` 합이 바뀌지 않는다. 회귀 시험이 그것을
+   * 본다.
+   */
+  readonly harmony?: readonly HarmonyMark[];
 }
 
 /** 이 음보다 낮으면 낮은음자리표가 읽기 편하다. score.ts와 같은 기준 */
@@ -231,14 +258,47 @@ const ACCIDENTAL_NAME: Record<number, string> = {
   [-2]: "flat-flat", [-1]: "flat", 0: "natural", 1: "sharp", 2: "double-sharp",
 };
 
+/** 음고류 → 음이름 + 변화. `sharp`가 어느 표를 쓸지 정한다 */
+function spellPc(pc: number, sharp: boolean): { step: string; alter: number } {
+  const [step, alter] = (sharp ? SHARP_SPELLING : FLAT_SPELLING)[pc];
+  return { step, alter };
+}
+
 /** MIDI 번호 → 표기. 조표의 방향 하나로 ♯계·♭계를 통째로 고른다 */
 function spell(midi: number, spelling: Spelling) {
   const rounded = Math.round(midi);
   const pc = ((rounded % 12) + 12) % 12;
   // 단조의 이끎음만 ♭계 조에서도 ♯계 표를 쓴다(`spellingFor` 주석)
   const sharp = spelling.fifths >= 0 || pc === spelling.sharpen;
-  const [step, alter] = (sharp ? SHARP_SPELLING : FLAT_SPELLING)[pc];
-  return { step, alter, octave: Math.floor(rounded / 12) - 1 };
+  return { ...spellPc(pc, sharp), octave: Math.floor(rounded / 12) - 1 };
+}
+
+/**
+ * 코드 심볼 하나. `<offset>`은 부르는 쪽이 붙인다.
+ *
+ * **근음에는 단조 이끎음 예외를 적용하지 않는다.** 그것은 선율 표기 규칙이라
+ * (D단조의 C♯이 D♭으로 나오는 것을 막는 장치) 코드 근음에 걸면 D단조에서
+ * 근음 D♭이 C♯으로 바뀌는 엉뚱한 일이 난다. 근음은 조표 방향만 따른다 —
+ * `analysis/chords.rootName`이 쓰는 규칙과 같아야 화면의 코드 표와 악보가
+ * 갈리지 않는다.
+ *
+ * 자식 순서가 규격이다 — root → kind → (offset). 어기면 읽는 쪽이 흘린다.
+ */
+function harmonyXml(mark: HarmonyMark, spelling: Spelling, offset: number): string {
+  const pc = ((Math.round(mark.root) % 12) + 12) % 12;
+  const { step, alter } = spellPc(pc, spelling.fifths >= 0);
+  const root =
+    `<root><root-step>${step}</root-step>` +
+    (alter ? `<root-alter>${alter}</root-alter>` : "") +
+    "</root>";
+  const kind = `<kind text="${escapeXml(mark.text)}">${escapeXml(mark.kind)}</kind>`;
+  return (
+    '<harmony placement="above" print-frame="no">' +
+    root +
+    kind +
+    (offset ? `<offset>${offset}</offset>` : "") +
+    "</harmony>"
+  );
 }
 
 interface Piece {
@@ -345,16 +405,33 @@ function measureXml(
   spelling: Spelling,
   attributes: string,
   lyric: string,
+  harmonies: readonly HarmonyAt[] = [],
 ): string {
   /** 자리(음이름+옥타브) → 지금 그 자리에 유효한 변화 */
   const active = new Map<string, number>();
   const beams = beamsFor(pieces, PER_BEAT);
+  /** 아직 안 흘린 코드. `at` 오름차순이다 */
+  let pending = 0;
   const body = pieces
     .map((piece, index_) => {
+      // **이 조각이 덮는 구간에 걸린 코드를 `<note>` 앞에 흘린다.** 쉼표도
+      // 조각이라 마디의 모든 칸이 덮여 있어(`toMusicXml`의 채움 루프) 붙일
+      // 자리가 없는 코드는 생기지 않는다. 마지막 조각은 남은 것을 전부 받는다.
+      const last = index_ === pieces.length - 1;
+      let harmony = "";
+      while (
+        pending < harmonies.length &&
+        (last || harmonies[pending].at < piece.at + piece.units)
+      ) {
+        const mark = harmonies[pending];
+        // `<offset>`은 **지금 커서**(= 이 조각의 시작)에서의 거리다
+        harmony += harmonyXml(mark.mark, spelling, Math.max(0, mark.at - piece.at));
+        pending += 1;
+      }
       const duration = `<duration>${piece.units}</duration>`;
       const type = `<type>${piece.type}</type>${"<dot/>".repeat(piece.dots)}`;
       if (piece.midi === null) {
-        return `<note><rest/>${duration}${type}</note>`;
+        return `${harmony}<note><rest/>${duration}${type}</note>`;
       }
       const { step, alter, octave } = spell(piece.midi, spelling);
       const slot = `${step}${octave}`;
@@ -387,12 +464,61 @@ function measureXml(
       // pitch → duration → tie → type → dot → accidental → beam → notations
       // → lyric. 어기면 verovio가 그 음표를 조용히 흘린다.
       return (
-        `<note>${pitch}${ties}${duration}${type}${accidental}` +
+        `${harmony}<note>${pitch}${ties}${duration}${type}${accidental}` +
         `${beams[index_]}${notations}${piece.tieStop ? "" : lyric}</note>`
       );
     })
     .join("");
   return `<measure number="${index}">${attributes}${body}</measure>`;
+}
+
+/** 마디 안의 코드 하나. `at`은 마디 시작부터의 거리(divisions) */
+interface HarmonyAt {
+  readonly at: number;
+  readonly mark: HarmonyMark;
+}
+
+/**
+ * 코드 심볼을 마디별로 나눠 담는다.
+ *
+ * 격자 칸을 divisions 단위로 옮기고, 악보 범위 밖은 접는다 — **앞은 자르지 않고
+ * 첫 마디로 당긴다**(비트가 첫 다운비트보다 앞서면 칸 번호가 음수가 되는데,
+ * 거기 있던 코드를 버리면 곡의 첫 코드가 통째로 사라진다). 같은 자리에 둘이
+ * 겹치면 **나중 것이 이긴다** — 뒤따르는 음표에 실제로 걸린 코드다.
+ */
+function harmonyByBar(
+  marks: readonly HarmonyMark[],
+  scale: number,
+  start: number,
+  end: number,
+  perBar: number,
+): Map<number, HarmonyAt[]> {
+  const slots = new Map<number, Map<number, HarmonyMark>>();
+  const placed = marks
+    .map((mark) => ({ mark, unit: Math.max(start, Math.round(mark.step * scale)) }))
+    .filter(({ unit }) => unit < end)
+    .sort((a, b) => a.unit - b.unit);
+
+  for (const { mark, unit } of placed) {
+    const index = Math.floor((unit - start) / perBar);
+    let bar = slots.get(index);
+    if (!bar) {
+      bar = new Map();
+      slots.set(index, bar);
+    }
+    bar.set(unit - (start + index * perBar), mark);
+  }
+
+  const out = new Map<number, HarmonyAt[]>();
+  for (const [index, bar] of slots) {
+    out.set(
+      index,
+      [...bar]
+        .map(([at, mark]) => ({ at, mark }))
+        .sort((a, b) => a.at - b.at),
+    );
+  }
+  return out;
 }
 
 /**
@@ -501,6 +627,7 @@ export function toMusicXml(
     ? `<lyric><syllabic>single</syllabic>` +
       `<text>${escapeXml(options.lyric)}</text></lyric>`
     : "";
+  const harmonies = harmonyByBar(options.harmony ?? [], scale, start, end, perBar);
   const measures = bars
     .map((pieces, i) =>
       measureXml(
@@ -509,6 +636,7 @@ export function toMusicXml(
         spelling,
         i === 0 ? attributes : "",
         lyric,
+        harmonies.get(i),
       ),
     )
     .join("");

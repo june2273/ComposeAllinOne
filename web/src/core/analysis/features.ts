@@ -55,7 +55,11 @@ const BANK_MAX_HZ = 11_000;
  * 간격은 10.8Hz인데 200Hz에서 반음 간격이 12.2Hz다 — 그 아래로 내려가면 빈
  * 하나가 반음보다 넓어져 접는 순간 옆 칸으로 샌다. 베이스 근음이 빠지지만
  * 옥타브·배음이 같은 음고류를 채우므로 조성 판정에는 견딜 만하다.
- * (코드 인식을 붙일 때는 이 방식으로 부족하다 — CQT나 더 긴 창이 필요하다.)
+ *
+ * **코드 인식은 이걸로 부족해서 따로 뽑는다** — `extractChordChroma`가 창을
+ * 네 배로 늘려 베이스 근음까지 내려간다(아래 절). 여기를 그 값으로 바꾸지 말
+ * 것: 이 크로마는 박자(`meter.chromaChange`)와 조성(`key.estimateKey`)이 쓰고
+ * 있고, 바꾸는 순간 그 두 판정이 함께 움직인다.
  */
 const CHROMA_MIN_HZ = 200;
 const CHROMA_MAX_HZ = 2100;
@@ -307,6 +311,164 @@ export function extractOnsetCurve(
 ): { readonly hopMs: number; readonly strength: Float32Array } {
   const { onset, fps } = extractFeatures(samples, sampleRate);
   return { hopMs: 1000 / fps, strength: normalizeOnset(onset, fps) };
+}
+
+// --- 코드용 크로마 --------------------------------------------------------------
+//
+// **두 번째 STFT 통과다.** 위 통과와 합칠 수 없다 — ODF는 짧은 창(시간 분해능)이,
+// 코드는 긴 창(주파수 분해능)이 필요하고 둘은 정면으로 상충한다(불확정성).
+
+/**
+ * 코드용 창 길이 (≈371ms). **빈 간격 2.69Hz.**
+ *
+ * 위 크로마가 200Hz에서 막힌 이유가 빈 간격(10.8Hz) > 반음 폭이었다. 창을 네
+ * 배로 늘리면 빈 간격이 1/4이 되어 **C2(65Hz)의 반음 폭 3.8Hz까지** 내려간다 —
+ * 대중음악 베이스 근음(E2 82Hz ~ A2 110Hz)이 여기 들어온다.
+ *
+ * **CQT가 아니라 긴 창인 이유.** CQT는 옥타브마다 창을 달리 잡아 저역에서만
+ * 길게 보는 방식이라 더 정확하지만, 커널 행렬이라는 기계를 통째로 들여야 한다.
+ * 우리가 필요한 것은 "근음이 옆 칸으로 새지 않는다" 하나뿐이고, 고역에서 창이
+ * 필요 이상으로 긴 대가는 **어차피 비트 단위로 평균할 것**이라 크지 않다.
+ */
+export const CHORD_FRAME_SIZE = 8192;
+/** 코드용 홉 (≈46ms). 120BPM 기준 한 박에 프레임 10개쯤 들어온다 */
+export const CHORD_HOP_SIZE = 1024;
+
+/** C2. 그 아래는 이 창으로도 반음이 빈 하나에 못 미친다 */
+const CHORD_MIN_HZ = 65;
+/** 위 크로마와 같다. 이 위는 배음뿐이라 근음 판정에 보태지 못한다 */
+const CHORD_MAX_HZ = 2100;
+
+/**
+ * 베이스 크로마의 상한. `CHORD_MIN_HZ`~여기가 **근음이 사는 음역**이다.
+ *
+ * 대중음악 베이스는 E2(82Hz)~G3(196Hz)에 거의 다 들어온다. 200Hz를 넘기면
+ * 반주 화음이 섞여 들어와 "가장 낮은 음이 무엇인가"라는 물음이 흐려진다 —
+ * 하필 옛 크로마가 시작하던 자리다.
+ */
+const BASS_MAX_HZ = 200;
+
+/**
+ * 로그 압축의 세기 — `log10(1 + γ·|X|/peak)`.
+ *
+ * **생 진폭을 그대로 접으면 안 된다.** 조성 판정은 곡 전체를 평균해서 견뎠지만
+ * (`key.aggregateChroma`), 코드는 비트 하나를 보므로 그 순간 가장 센 배음
+ * 하나가 12칸을 독식한다 — 예를 들어 보컬이 3도를 세게 내면 그 비트가 근음
+ * 없는 화음처럼 보인다. 압축은 약한 성분을 끌어올려 **음이 있는가 없는가**에
+ * 가깝게 만든다(이진 템플릿이 재는 것이 정확히 그것이다).
+ *
+ * γ=100이면 peak 대비 1%인 성분이 최대값의 절반쯤으로 올라온다.
+ */
+const CHORD_GAMMA = 100;
+
+export interface ChordChroma {
+  /** 초당 프레임 수 */
+  readonly fps: number;
+  /** 프레임별 12차원 (frame * 12 + pc). 프레임마다 합이 1, 무음이면 0 */
+  readonly chroma: Float32Array;
+  /**
+   * 같은 모양인데 **베이스 음역만** 접은 것(`CHORD_MIN_HZ`~`BASS_MAX_HZ`).
+   *
+   * 근음을 가리는 용도다. 음고류 집합만으로는 `Dm7`(D F A C)과 `F6`(F A C D)이
+   * 같은 것이라 원리적으로 못 가르는데(사양서 §6이 aug·dim7에 대해 말한 것과
+   * 같은 종류의 대칭), **어느 음이 맨 아래 있는가**가 그것을 가른다.
+   */
+  readonly bass: Float32Array;
+  /**
+   * 프레임별 생 에너지(압축 전 진폭 합).
+   *
+   * 크로마가 프레임마다 정규화되어 **큰 소리와 무음이 구별되지 않으므로**,
+   * 비트 평균에서 어느 프레임을 얼마나 믿을지는 이 값이 정한다.
+   */
+  readonly energy: Float32Array;
+  readonly frameCount: number;
+}
+
+/**
+ * 코드 인식용 크로마. **원본 믹스에 건다**(사양서 §1.2 — 분리 스템이 아니다).
+ *
+ * `tuningCents`는 다시 재지 않고 첫 통과가 잰 값을 받는다. 같은 음원을 두 번
+ * 재면 두 값이 갈릴 수 있고, 그러면 조성과 코드가 서로 다른 격자 위에 선다.
+ */
+export function extractChordChroma(
+  samples: Float32Array,
+  sampleRate: number,
+  tuningCents: number,
+  onProgress?: (ratio: number) => void,
+): ChordChroma {
+  const frames = new SpectrumFrames(samples, CHORD_FRAME_SIZE, CHORD_HOP_SIZE);
+  const count = frames.count;
+  const fps = sampleRate / CHORD_HOP_SIZE;
+  if (count === 0) {
+    return {
+      fps,
+      chroma: new Float32Array(0),
+      bass: new Float32Array(0),
+      energy: new Float32Array(0),
+      frameCount: 0,
+    };
+  }
+
+  // 빈 → 음고류 표. 위 통과와 같은 방식으로 조율 편차를 한 번에 흡수한다.
+  const binHz = sampleRate / CHORD_FRAME_SIZE;
+  const from = Math.max(1, Math.ceil(CHORD_MIN_HZ / binHz));
+  const to = Math.min(frames.bins - 1, Math.floor(CHORD_MAX_HZ / binHz));
+  const binPc = new Int8Array(frames.bins).fill(-1);
+  for (let k = from; k <= to; k += 1) {
+    const pitch = 69 + 12 * Math.log2((k * binHz) / 440) - tuningCents / 100;
+    binPc[k] = (((Math.round(pitch) % 12) + 12) % 12) as number;
+  }
+
+  const bassTo = Math.min(to, Math.floor(BASS_MAX_HZ / binHz));
+  const chroma = new Float32Array(count * 12);
+  const bass = new Float32Array(count * 12);
+  const energy = new Float32Array(count);
+  const report = Math.max(1, Math.floor(count / 20));
+
+  for (let t = 0; t < count; t += 1) {
+    const mag = frames.at(t);
+
+    // 프레임 최대값으로 나눈 뒤 압축한다 — 곡의 음량 변화가 압축 세기를
+    // 바꾸지 않도록. 무음 프레임은 여기서 걸러지지 않고(잡음도 peak을 갖는다)
+    // `energy`가 알려 준다.
+    let peak = 0;
+    let raw = 0;
+    for (let k = from; k <= to; k += 1) {
+      if (mag[k] > peak) peak = mag[k];
+      raw += mag[k];
+    }
+    energy[t] = raw;
+    if (peak <= 0) continue;
+
+    let sum = 0;
+    let bassSum = 0;
+    const base = t * 12;
+    for (let k = from; k <= to; k += 1) {
+      const pc = binPc[k];
+      if (pc < 0) continue;
+      const value = Math.log10(1 + CHORD_GAMMA * (mag[k] / peak));
+      chroma[base + pc] += value;
+      sum += value;
+      if (k <= bassTo) {
+        // **베이스는 압축하지 않는다.** 압축은 약한 성분을 끌어올려 "음이
+        // 있는가"에 가깝게 만드는 장치인데, 여기서 묻는 것은 반대로 "무엇이
+        // 가장 센가"다 — 끌어올리면 근음이 배음·잡음과 같아진다.
+        bass[base + pc] += mag[k];
+        bassSum += mag[k];
+      }
+    }
+    if (sum > 0) {
+      for (let pc = 0; pc < 12; pc += 1) chroma[base + pc] /= sum;
+    }
+    if (bassSum > 0) {
+      for (let pc = 0; pc < 12; pc += 1) bass[base + pc] /= bassSum;
+    }
+
+    if (onProgress && t % report === 0) onProgress(t / count);
+  }
+  onProgress?.(1);
+
+  return { fps, chroma, bass, energy, frameCount: count };
 }
 
 /**

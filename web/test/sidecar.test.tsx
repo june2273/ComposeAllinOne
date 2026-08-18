@@ -92,15 +92,54 @@ describe("1. 감지 — 없어도 되는 것", () => {
 });
 
 describe("2. 분석 — 접수하고 물어본다", () => {
-  function server(steps: { stage: string; ratio: number; done: boolean; error?: string }[]) {
+  function server(
+    steps: { stage: string; ratio: number; done: boolean; error?: string }[],
+    structure: Route = () => reply({ detail: "없다" }, false, 404),
+  ) {
     let at = 0;
+    // **순서가 중요하다** — 이 표는 첫 일치를 쓰는데 `/jobs/j1`이 나머지를 전부
+    // 삼킨다. 긴 주소를 먼저 둔다
     return fakeFetch({
+      "/jobs/j1/structure": structure,
       "/jobs/j1/f0": () => reply(CURVE),
       "/jobs/j1/meta": () => reply(META),
       "/jobs/j1": () => reply({ error: null, ...steps[Math.min(at++, steps.length - 1)] }),
       "/jobs": () => reply({ jobId: "j1", cached: false }),
     });
   }
+
+  const DONE = [{ stage: "완료", ratio: 1, done: true }];
+
+  test("구조가 없으면 null이다 — 그것 때문에 전사까지 버리지 않는다", async () => {
+    const { fetch } = server(DONE);
+    const result = await analyzeWithSidecar(
+      new File([new Uint8Array([1])], "a.wav"),
+      undefined,
+      { baseUrl: BASE, fetch, pollMs: 0 },
+    );
+    expect(result.structure).toBeNull();
+    expect(result.curve.f0).toHaveLength(100);
+  });
+
+  test("구조가 있으면 그대로 실려 온다", async () => {
+    const { fetch } = server(DONE, () =>
+      reply({
+        engine: "allin1-harmonix-all",
+        bpm: 146,
+        beats: [0.5, 1.0],
+        downbeats: [0.5],
+        beatPositions: [1, 2],
+        segments: [{ start: 0, end: 14.77, label: "intro" }],
+      }),
+    );
+    const result = await analyzeWithSidecar(
+      new File([new Uint8Array([1])], "a.wav"),
+      undefined,
+      { baseUrl: BASE, fetch, pollMs: 0 },
+    );
+    expect(result.structure?.bpm).toBe(146);
+    expect(result.structure?.segments[0].label).toBe("intro");
+  });
 
   test("끝날 때까지 폴링하고 커브와 메타를 모은다", async () => {
     const { fetch, calls } = server([
@@ -194,6 +233,22 @@ const REPORT: AnalysisReport = {
   tuningCents: 0,
   beats: Array.from({ length: 16 }, (_, i) => i * 0.5),
   downbeats: [0, 2, 4, 6],
+  chords: [
+    {
+      startBeat: 0,
+      endBeat: 4,
+      startSec: 0,
+      endSec: 2,
+      root: 0,
+      quality: "maj",
+      symbol: "C",
+      kind: "major",
+      suffix: "",
+      confidence: 0.8,
+      candidates: [],
+    },
+  ],
+  chordConfidence: 0.8,
 };
 
 function panel(env: Partial<Parameters<typeof TranscriptionPanel>[0]>) {
@@ -297,6 +352,7 @@ describe("3. 화면 — 있을 때와 없을 때", () => {
           stems: ["vocals", "drums"],
           hasStems: true,
           hasMelody: true,
+          structure: null,
           durationSec: 1.5,
         }),
     });
@@ -355,6 +411,7 @@ describe("3. 화면 — 있을 때와 없을 때", () => {
         stems: [],
         hasStems: false,
         hasMelody: true,
+        structure: null,
         durationSec: 0.5,
       });
       await Promise.resolve();
@@ -384,6 +441,7 @@ const HELD: SidecarResult = {
   stems: ["vocals"],
   hasStems: true,
   hasMelody: true,
+  structure: null,
   durationSec: 1.5,
 };
 

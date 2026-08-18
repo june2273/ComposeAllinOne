@@ -15,8 +15,10 @@ import type { AnalysisReport } from "../core/analysis";
 import { ScoreRenderer } from "../core/score";
 import {
   type OnsetCurve,
+  type TranscribeContext,
   type Transcription,
   toMidiFiles,
+  toSvp,
   transcribe,
 } from "../core/transcribe";
 import { extractOnset } from "../platform/analyze";
@@ -37,6 +39,7 @@ import {
   type SidecarHealth,
   type SidecarProgress,
   type SidecarResult,
+  type SidecarStructure,
 } from "../platform/sidecar";
 
 /** 스템 이름을 사람이 읽는 말로. 이 표가 도메인 지식의 전부다 */
@@ -50,7 +53,7 @@ const STEM_LABELS: Record<string, string> = {
 type State =
   | { name: "idle" }
   | { name: "running"; progress: SidecarProgress }
-  | { name: "done"; result: SidecarResult; transcription: Transcription }
+  | { name: "done"; result: SidecarResult; onset: OnsetCurve | undefined }
   | { name: "error"; message: string };
 
 export interface TranscriptionPanelProps {
@@ -64,6 +67,12 @@ export interface TranscriptionPanelProps {
   run?: typeof analyzeWithSidecar;
   /** 테스트가 온셋 추출을 건너뛰는 자리 */
   onset?: (audio: Blob, signal?: AbortSignal) => Promise<OnsetCurve>;
+  /**
+   * 구조 분석 결과를 위로 올린다. **여기서 계산하지 않는다** — 이 파일은
+   * 결선만 하는 자리이고, 구간을 마디로 옮기고 라벨을 다시 붙이는 것은
+   * `core/analysis/sections.ts`의 일이다.
+   */
+  onStructure?: (structure: SidecarStructure | null) => void;
 }
 
 /**
@@ -96,6 +105,7 @@ export function TranscriptionPanel({
   probe = detect,
   run = analyzeWithSidecar,
   onset = (audio, signal) => extractOnset(audio, {}, signal),
+  onStructure,
 }: TranscriptionPanelProps) {
   // null = 아직 확인 중, false = 없음
   const [health, setHealth] = useState<SidecarHealth | null | false>(null);
@@ -135,23 +145,8 @@ export function TranscriptionPanel({
         setState({ name: "running", progress: { stage: "온셋 찾는 중", ratio: 0.97 } });
         const curve = await onsetOf(result, env, onset, controller.signal);
         if (controller.signal.aborted) return;
-        setState({
-          name: "done",
-          result,
-          transcription: transcribe(
-            result.curve,
-            {
-              bpm: report.tempo.bpm,
-              beats: report.beats,
-              downbeats: report.downbeats,
-              beatsPerBar: report.meter.beatsPerBar,
-              tuningCents: report.tuningCents,
-              key: { tonic: report.key.tonic, mode: report.key.mode },
-              title: file.name,
-            },
-            { onset: curve },
-          ),
-        });
+        setState({ name: "done", result, onset: curve });
+        onStructure?.(result.structure);
       })
       .catch((failure: unknown) => {
         if (controller.signal.aborted) return;
@@ -160,7 +155,44 @@ export function TranscriptionPanel({
           message: failure instanceof Error ? failure.message : String(failure),
         });
       });
-  }, [env, file, report, run]);
+  }, [env, file, onset, onStructure, run]);
+
+  /**
+   * 전사 문맥. `report`가 참조 자체를 바꾸므로(사용자가 템포 후보를 직접
+   * 고르면 `AnalysisPage`가 새로 분석해 새 report를 내려보낸다) 여기서도
+   * 다시 만들어야 아래 `transcription`이 그걸 반영해 재계산된다.
+   */
+  const context = useMemo<TranscribeContext>(
+    () => ({
+      bpm: report.tempo.bpm,
+      beats: report.beats,
+      downbeats: report.downbeats,
+      beatsPerBar: report.meter.beatsPerBar,
+      tuningCents: report.tuningCents,
+      key: { tonic: report.key.tonic, mode: report.key.mode },
+      title: file.name,
+      // **두 층을 잇는 자리다.** `core/transcribe`는 `core/analysis`를 모르므로
+      // (서로 import하지 않는다) `ChordEvent`를 저쪽이 아는 모양으로 옮기는
+      // 것은 이 파일의 일이다 — 온셋 곡선을 넘길 때와 같다.
+      chords: report.chords.map((chord) => ({
+        atSec: chord.startSec,
+        root: chord.root,
+        kind: chord.kind,
+        text: chord.suffix,
+      })),
+    }),
+    [report, file],
+  );
+
+  /**
+   * **사이드카를 다시 부르지 않는다.** f0 커브(`result.curve`)와 온셋은
+   * 이미 있고, `transcribe()`는 순수 함수라 문맥만 바뀌면 다시 돌려도 싸다 —
+   * 스템 분리·멜로디 추출(수 분)을 BPM 보정 한 번에 다시 태우지 않기 위해서다.
+   */
+  const transcription: Transcription | null = useMemo(
+    () => (state.name === "done" ? transcribe(state.result.curve, context, { onset: state.onset }) : null),
+    [state, context],
+  );
 
   if (health === null) return null;
   if (health === false) return <SidecarMissing />;
@@ -207,12 +239,14 @@ export function TranscriptionPanel({
         </>
       )}
 
-      {state.name === "done" && (
+      {state.name === "done" && transcription && (
         <Results
           result={state.result}
-          transcription={state.transcription}
+          transcription={transcription}
           bpm={report.tempo.bpm}
           beatsPerBar={report.meter.beatsPerBar}
+          title={file.name}
+          musicalKey={{ tonic: report.key.tonic, mode: report.key.mode }}
           env={env}
           onRetry={start}
         />
@@ -281,6 +315,8 @@ function Results({
   transcription,
   bpm,
   beatsPerBar,
+  title,
+  musicalKey,
   env,
   onRetry,
 }: {
@@ -288,6 +324,8 @@ function Results({
   transcription: Transcription;
   bpm: number;
   beatsPerBar: number;
+  title: string;
+  musicalKey: { tonic: number; mode: "major" | "minor" };
   env?: SidecarEnv;
   onRetry: () => void;
 }) {
@@ -295,7 +333,12 @@ function Results({
     () => toMidiFiles(transcription, { bpm, beatsPerBar }),
     [beatsPerBar, bpm, transcription],
   );
-  const downloads = useDownloads(transcription, files);
+  // `Transcription`이 커브와 격자를 그대로 들고 있으므로 그대로 넘긴다
+  const svp = useMemo(
+    () => toSvp(transcription, { title, bpm, key: musicalKey }),
+    [bpm, musicalKey, title, transcription],
+  );
+  const downloads = useDownloads(transcription, files, svp);
   const svg = useScore(transcription.musicXml);
 
   const range = transcription.notes.length
@@ -403,6 +446,7 @@ interface Download {
 function useDownloads(
   transcription: Transcription,
   files: { performed: Uint8Array; quantized: Uint8Array },
+  svp: string,
 ): Download[] {
   const [items, setItems] = useState<Download[]>([]);
   useEffect(() => {
@@ -440,11 +484,19 @@ function useDownloads(
         ),
         filename: "melody-la.musicxml",
       },
+      {
+        // **음표만 주면 신스V의 AI가 자기 피치 커브를 새로 만들어 붙인다.**
+        // 이 파일에는 원 보컬의 f0가 컨트롤 점으로 들어 있어 비브라토·포르타멘토·
+        // 스쿠핑이 그대로 간다(`core/transcribe/svp.ts`).
+        label: "신스V 프로젝트 (피치 커브 포함)",
+        href: make(svp, "application/octet-stream"),
+        filename: "melody.svp",
+      },
     ]);
     return () => {
       for (const url of urls) URL.revokeObjectURL(url);
     };
-  }, [files, transcription]);
+  }, [files, svp, transcription]);
   return items;
 }
 

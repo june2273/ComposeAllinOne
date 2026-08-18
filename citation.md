@@ -230,8 +230,47 @@ verovio는 **웹 번들에 통째로 들어간다**(`dist/assets/verovio-module-
 |---|---|---|---|---|
 | [demucs](https://github.com/adefossez/demucs) | 4.1.0 | **MIT** (`dist-info/licenses/LICENSE` 원문 확인) | 아래 참조 | `app/stems.py` — htdemucs 4스템 분리 |
 | [rmvpe-onnx](https://github.com/NewComer00/rmvpe-onnx) | 0.2.3 | **MIT** (`dist-info/licenses/LICENSE` 원문: "Copyright (c) 2026 NewComer00" + MIT 전문) | 아래 참조 (별도 다운로드) | `app/melody.py` — 보컬 f0 커브 |
+| [allin1](https://github.com/mir-aidj/all-in-one) | 1.1.0 | **MIT** (`dist-info/licenses/LICENSE` 원문: "Copyright (c) 2023 Taejun Kim" + MIT 전문) | 아래 참조 | `app/structure.py` — 구간(intro/verse/chorus…)·비트·다운비트 |
 | [torch](https://pytorch.org/) | 2.13.0 | Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND MIT | — | demucs가 쓴다. Apple Silicon에서 MPS 가속 |
 | [onnxruntime](https://onnxruntime.ai/) | 1.28.0 | MIT | — | rmvpe-onnx의 추론 백엔드 |
+
+**All-In-One (곡 구조) — 2026-08-12에 들어왔다**
+
+Kim & Nam, "All-In-One Metrical And Functional Structure Analysis With
+Neighborhood Attentions on Demixed Audio", WASPAA 2023
+([arXiv 2307.16425](https://arxiv.org/abs/2307.16425)). 사양서 §2가 구조 분석의
+주 도구로 지목한 것이다.
+
+**가중치는 이번에는 미확인이 아니다.** `harmonix-all` 체크포인트를 HuggingFace
+[`taejunkim/allinone`](https://huggingface.co/taejunkim/allinone)에서 첫 사용 때
+받는데, 그 저장소의 `cardData.license`와 태그가 **둘 다 `mit`**이다(HF API
+`https://huggingface.co/api/models/taejunkim/allinone`로 직접 확인, 2026-08-12).
+htdemucs·RMVPE 가중치가 "코드만 MIT이고 가중치 문서는 못 봤다"인 것과 이 점이
+다르다.
+
+다만 **학습 데이터인 [Harmonix Set](https://github.com/urinieto/harmonixset)은
+주석만 공개된 것**이라(오디오는 없다) 데이터 출처의 사슬은 여기서 끊긴다.
+
+| 딸려 오는 것 | 버전 | 라이선스 | 메모 |
+|---|---|---|---|
+| [natten](https://github.com/SHI-Labs/NATTEN) | **0.17.5 (핀)** | MIT (`licenses/LICENSE` 원문: "Copyright (c) 2022 - 2025 Ali Hassani") | Dilated Neighborhood Attention 커널. **버전을 올리지 말 것** — 아래 환경 제약 |
+| [madmom](https://github.com/CPJKU/madmom) | 0.17.dev0 (git) | **소스는 BSD-3-Clause, 데이터·모델 파일은 CC BY-NC-SA 4.0** | 아래 |
+| [hydra-core](https://github.com/facebookresearch/hydra) | 1.3.5 | MIT | allin1의 설정 관리 |
+| [omegaconf](https://github.com/omry/omegaconf) | 2.3.1 | BSD-3-Clause | hydra가 끌고 온다 |
+| [matplotlib](https://matplotlib.org/) | 3.11.1 | PSF-based (matplotlib 고유 라이선스) | allin1의 `visualize=True` 전용. **우리는 끄고 쓴다** |
+
+> **madmom의 라이선스가 둘로 갈려 있다** (LICENSE 원문 직접 확인, 2026-08-12).
+> `.py`/`.pyx` 같은 소스는 BSD-3-Clause인데, `.npy`·`.npz`·`.h5`·`.pkl` 같은
+> **데이터·모델 파일은 CC BY-NC-SA 4.0(비상업·동일조건)**이고 LICENSE가 상업적
+> 이용은 저자에게 연락하라고 적어 두었다.
+>
+> **우리 실행 경로는 소스만 탄다.** allin1이 madmom에서 부르는 것은
+> `audio.signal`·`audio.stft`·`audio.spectrogram`·`processors`뿐이고(실측:
+> `grep madmom allin1/**/*.py`), 그건 전부 순수 DSP 소스다. 모델 파일을 쓰는
+> `madmom.evaluation.beats`는 `allin1/training/` 아래에서만 import되는데 우리는
+> 그 모듈을 부르지 않는다. **다만 패키지 자체에는 그 파일들이 함께 들어 있으므로,
+> 사이드카 환경을 통째로 재배포하는 형태가 되면 다시 볼 것.** 성격이 GAME
+> 가중치와 같은 부류다(아래 3-1절).
 
 > **basic-pitch(0.4.0, Apache-2.0, Spotify AB)는 2026-08-11에 제거했다.** 멜로디
 > f0를 RMVPE로 갈아끼우면서 빠졌다 — 실곡 대조에서 정확 매칭이 189 → 515로
@@ -304,6 +343,22 @@ MIT 표기 아래 있는 것이 맞는지.
   `resampy`뿐이었고(librosa는 테스트 extra에서만 요구한다 — 실측), resampy를
   요구하던 것은 basic-pitch뿐이었다. 지금은 의존성 전체를 import해도
   `sys.modules`에 `pkg_resources`가 올라오지 않는다(실측).
+- **natten을 `0.17.5`에 핀했다** (실측 2026-08-12). allin1 1.1.0은 2023년의
+  natten API(`natten1dqkrpb`·`natten1dav`·2D 짝)로 쓰였는데 그 사이 두 번
+  갈렸다. **0.21.7**(최신)은 rpb를 받는 분리형 API를 아예 없애서 못 쓴다 —
+  rpb는 가중치에 들어 있는 학습된 값이라 버릴 수 없다. **0.14.6**(원래 버전)은
+  torch 2.13 헤더에서 컴파일이 깨진다(`ATen/cpu/vec/functional_bfloat16.h`의
+  `convert_to_float` 시그니처 변경). **0.17.5만 둘 다 만족한다** — 같은 함수가
+  `na1d_qk(..., rpb=)`로 이름만 바뀌어 남아 있다. 이름을 다시 붙이는 shim이
+  `app/structure.py`의 `_prepare_natten()`이고, 거기 셋 중 나머지 둘도 같은
+  성격이다(torch가 없앤 `torch.cuda._device_t`, natten이 import 시점에 부르는
+  CUDA 능력치 조회). **셋 다 import 시점에 시끄럽게 터지는 종류라** 조용히 틀린
+  결과를 내지 않는다.
+- **natten 0.17.5는 소스 빌드다.** macOS arm64용 휠이 없어 clang이 돈다 —
+  `pip install --no-build-isolation "natten==0.17.5"`(격리를 끄지 않으면 빌드
+  환경에 torch가 없어 setup.py가 죽는다).
+- **allin1도 CPU로 돌린다**(`structure._DEVICE`). natten 커널이 MPS를 지원하지
+  않는다. 실측: 234초 곡에 205초(자기 htdemucs 분리 포함).
 - **RMVPE는 CPU로 돌린다.** onnxruntime이 Apple Silicon에서 CoreML을 고르면
   긴 곡에서 죽는다 — 255초(25502프레임)에서 `Error executing model: Error in
   building plan`(실측). **1초짜리 사인파로는 멀쩡히 돌아서** 자가진단을 통과하고
@@ -348,6 +403,50 @@ FFT까지 직접 짰다. 따라서 여기에 걸리는 라이선스는 없지만
 | Temperley 조성 프로파일 | Temperley, *The Cognition of Basic Musical Structures*, MIT Press 2001 (Kostka-Payne 코퍼스 기반) | `analysis/key.ts` `TEMPERLEY` |
 | 크로마 = 옥타브 등가성으로 접기 | 강의 03(음악 정보학) · Bartsch & Wakefield, WASPAA 2001 | `analysis/features.ts` |
 
+**템포 배수(옥타브) 오류 — 읽기만 하고 채택하지 않은 것들**(2026-08-18).
+절반 방향 교정을 설계하면서 선행 연구를 훑었다. **어느 것도 구현하지 않았다** —
+전부 학습된 판정기라 정답 BPM 9곡으로는 성립하지 않는다. 아래는 "왜 안 했는가"의
+근거이고, 평가셋이 커지면 다시 볼 목록이다. 검토 경위와 죽은 가설은
+`docs/템포_배수오류_미해결.md`에 있다.
+
+| 문헌 | 무엇을 하는가 | 왜 안 썼나 |
+|---|---|---|
+| Peeters & Papadopoulos, "Beat Critic: Beat Tracking Octave Error Identification by Metrical Profile Analysis", ISMIR 2010 ([PDF](https://archives.ismir.net/ismir2010/paper/000019.pdf)) | 스펙트럼 부대역별 metrical profile로 배수 오류를 **양방향 대칭** 판정 | 분류기를 학습시킨다. **부대역으로 나눈다는 축은 우리가 아직 안 해 봤다** |
+| Klapuri, Eronen & Astola, "Analysis of the Meter of Acoustic Musical Signals", IEEE TSALP 14(1), 2006 ([PDF](https://www.iro.umontreal.ca/~pift6080/H09/documents/papers/klapuri_meter.pdf)) | tatum·tactus·measure를 확률 모형으로 **동시 추정** | 우리 캐스케이드가 일방향인 것의 정반대라 통째로 갈아엎는 일이 된다 |
+| Schreiber & Müller, "Exploiting Global Features for Tempo Octave Correction", ICASSP 2014 ([PDF](https://www.audiolabs-erlangen.de/content/05_fau/professor/00_mueller/03_publications/2014_SchreiberMueller_TempoEstimation_ICASSP.pdf)) | 평균 스펙트럼 노벨티라는 전역 특징으로 옥타브 교정 | 특징과 지각 템포의 관계를 데이터로 맞춰야 한다 |
+| Percival & Tzanetakis, "Streamlined Tempo Estimation Based on Autocorrelation and Cross-correlation With Pulses", IEEE TASLP 22(12), 2014 | 자기상관 + 펄스열 교차상관. 옥타브 교정을 "아주 단순한 휴리스틱"으로 | **의존성 없는 계열이라 우리와 가장 가깝다.** 실제 휴리스틱을 아직 확인 못 했다 — 다음에 볼 때 여기부터 |
+
+**코드 인식**(2026-08-13 추가). 강의 07(chord recognition, GCT731)이
+정리한 고전 파이프라인 — **크로마 → 이진 템플릿 → HMM Viterbi** — 을 그대로
+세웠다. 학습된 모델도 학습 데이터도 쓰지 않으므로 새 의존성이 없다.
+
+| 알고리즘 | 출처 | 우리 코드 |
+|---|---|---|
+| 이진 코드 템플릿 매칭 (12 장 + 12 단 = 24개, 크로마와의 상관) | Fujishima, "Realtime Chord Recognition of Musical Sound: a System Using Common Lisp Music", ICMC 1999 · Müller, *Fundamentals of Music Processing* 5장 · 강의 07 | `analysis/chords.ts` `chordTemplates` |
+| 코드 열의 HMM/Viterbi 후처리 (프레임 단위 최댓값은 시간 의존성을 못 본다) | Sheh & Ellis, "Chord Segmentation and Recognition using EM-Trained HMMs", ISMIR 2003 · 강의 07 | `analysis/chords.ts` `decode` |
+| **비트 동기 크로마** — 코드 인식은 프레임이 아니라 비트 위에서 돈다 | Bartsch & Wakefield, WASPAA 2001 (위 표에도 있다) | `analysis/meter.ts` `beatChroma` |
+| 로그 압축 크로마 `log(1 + γ·‖X‖)` — 센 배음 하나가 12칸을 독식하는 것을 막는다 | Müller & Ewert, "Towards Timbre-Invariant Audio Features for Harmony-Based Music", IEEE TASLP 18(3), 2010 · 위 *FMP* 3장 | `analysis/features.ts` `extractChordChroma` |
+
+**직접 정한 것 넷**(강의에도 문헌에도 없다. 근거는 실측이거나 사양서다):
+
+1. **창을 8192로 넓힌 것** — 옛 크로마의 하한 200Hz는 빈 간격(10.8Hz)이
+   반음보다 넓어지는 분해능 한계였다. 네 배로 늘려 C2(65Hz)까지 내려간다.
+   CQT가 정석이지만 커널 기계를 통째로 들여야 해서, 필요한 것(근음이 옆 칸으로
+   안 새는 것)만 얻는 쪽을 골랐다.
+2. **마디선에서 코드 변경이 싸다** — 학습된 전이 행렬(강의 그림의 Beatles
+   행렬)은 데이터가 있어야 나온다. 대신 "코드는 마디선에서 바뀐다"만 썼다.
+   `transcribe/quantize.ts`의 박절 사전과 같은 종류의 지식이다.
+3. **베이스 음역(65~200Hz)으로 근음을 가른다** — `Dm7`(D F A C)과
+   `F6`(F A C D)은 음고류 집합이 같아 원리적으로 안 갈린다(사양서 §6이
+   aug·dim7에 대해 말한 대칭과 같은 종류). 실측: 베이스 항이 없으면 `F`,
+   있으면 `Dm7`이 나왔다.
+4. **비트 안쪽에 무게를 더 준다** — 창(371ms)이 비트(120BPM에서 500ms)보다
+   짧지 않아 비트 머리의 프레임이 앞 코드를 함께 본다. 실측: 이게 없으면
+   합성 왕도진행에서 `G7`과 `Em7`이 한 덩어리로 뭉갰다.
+
+상수(`NO_CHORD_SCORE`·`CHANGE_COST_*`·`SEVENTH_RATIO`·`BASS_WEIGHT`)는
+**전부 평가셋 없이 정했다** — 코드 정답을 찍어 둔 곡이 아직 하나도 없다.
+
 **리듬 양자화**(2026-08-10 추가). 실곡에서 `점8분쉼표 + 16분음표`가 남발되는
 증상을 고치며 문헌을 확인했다. 최근접 반올림이 실패하는 것은 알려진 문제이고,
 해법의 계보는 아래와 같다. **아이디어(비용의 구성)만 가져왔고 수식·코드·파라미터는
@@ -363,6 +462,13 @@ FFT까지 직접 짰다. 따라서 여기에 걸리는 라이선스는 없지만
 | "f0 추정 → 타텀 반올림" 캐스케이드가 노래에서 실패하는 이유 | Nishikimi, Nakamura, Yoshii et al., "Audio-to-score singing transcription based on a CRNN-HSMM hybrid model", APSIPA Trans. 2021 | (문제 진단) |
 | 가수의 타이밍 편차는 표현이자 습관 — 악보 시작 ≠ 발성 시작 | Hono et al., "Singing Voice Synthesis Based on Frame-Level Sequence-to-Sequence Models Considering Vocal Timing Deviation", [arXiv 2301.02262](https://arxiv.org/abs/2301.02262) | `transcribe/quantize.ts` `estimateOffsetMs` |
 | **클록 드리프트** — 밀린 양이 곡 안에서 변한다. 양자화와 템포/오프셋 곡선을 함께 푼다 | Cemgil & Kappen, "Monte Carlo Methods for Tempo Tracking and Rhythm Quantization", *JAIR* 18, 2003 — [doi:10.1613/jair.1121](https://doi.org/10.1613/jair.1121) · 위 Nakamura 2017도 드리프트 변수를 둔다 | `transcribe/quantize.ts` `estimateOffsetCurve` (2026-08-10 추가) |
+
+| **다각선 단순화(RDP)** — 극점을 남기며 점을 줄인다. 피치 컨트롤 점 개수를 한 자릿수 줄이는 데 쓴다 | Ramer, "An iterative procedure for the polygonal approximation of plane curves", *CGIP* 1(3), 1972 · Douglas & Peucker, *Cartographica* 10(2), 1973 | `transcribe/curve.ts` `simplify` (2026-08-12 추가) |
+
+**RDP는 세로거리로 잰다.** 원 알고리즘은 선분까지의 수직거리를 쓰지만 우리 축은
+가로가 초·세로가 반음이라 수직거리에 뜻이 없다. 지키려는 양이 "그 시각의 음높이가
+얼마나 틀리는가"이므로 **같은 시각의 세로 오차(센트)**로 바꿔 썼다. 코드는 옮기지
+않았고 반복 절차만 따랐다(재귀 대신 명시적 스택).
 
 **드리프트는 2026-08-10에 실측으로 필요성이 확인되고 추가됐다** — 정답 MIDI가
 있는 실곡에서 밀린 양이 −56~+60ms를 오갔다(16분 한 칸이 108ms). Cemgil은
@@ -383,6 +489,26 @@ Essentia 등)에 널리 재수록되어 사실상 표준 상수로 쓰인다. �
 박자표 판정(축 A·B)에는 출처가 없다. 표준 해법이 없는 영역이라
 `rise/PIPELINE_SPEC.md`(이 저장소 밖) §5의 분해 방침만 따르고 판정 규칙과 임계값은 직접
 정했다 — 근거 없는 상수라는 뜻이므로 평가셋이 생기면 다시 맞춰야 한다.
+
+### Synthesizer V 프로젝트 형식(`.svp`) — 실측으로 알아낸 것
+
+`web/src/core/transcribe/svp.ts`가 신스V 2 프로젝트 파일을 쓴다. **공식 형식
+명세는 공개돼 있지 않고, Dreamtonics의 문서 사이트는 자동 조회를 막는다(HTTP 403).**
+그래서 **사용자 본인의 작업 파일 6개를 열어 구조를 관찰했다**(2026-08-12):
+`/Volumes/june2_07ssd/신스비/`의 `밤파이아`·`붸게`·`staccato`·`널따라`(v196)와
+`Charles`·`열이상`(v182·v187).
+
+- **저작물을 가져오지 않았다.** 읽은 것은 JSON의 **키 이름과 값의 형태**이고,
+  음악 내용(음표·가사·피치)은 쓰지 않았다. 파일은 저장소에 복사하지 않았다.
+- 저장소 안에 이미 읽는 쪽 구현이 있었다 — `server/scripts/evalset.py`의
+  `svp_tracks()`가 정답 MIDI를 굽느라 같은 형식을 파싱한다. `BLICKS_PER_QUARTER
+  = 705,600,000`은 거기서 왔다.
+- 기능 설명(Smart Pitch Controls, "Extract Notes from Audio"의 제약)은 공개
+  매뉴얼에서 확인했다 — [Voice-to-MIDI Conversion](https://manual.synthv.info/ai-functions/voice-to-midi/)
+  (비공식 매뉴얼) 및 Dreamtonics 공식 문서의 검색 요약. **본문을 옮기지 않았다.**
+- **형식은 언제든 바뀔 수 있다.** 관찰로 얻은 규약이므로 신스V가 판올림하면
+  깨질 수 있다. 회귀 시험(`web/test/svp.test.ts`)이 참조·그룹·음표의 키 목록을
+  못 박아 두었으니, 그 테스트가 깨지면 실제 파일과 다시 대조할 것.
 
 ### 강의 자료
 

@@ -111,6 +111,7 @@ function runInWorker(
   sampleRate: number,
   onProgress?: (progress: AnalysisProgress) => void,
   signal?: AbortSignal,
+  forceBpm?: number,
 ): Promise<AnalysisReport> {
   return new Promise((resolve, reject) => {
     if (signal) {
@@ -146,7 +147,7 @@ function runInWorker(
       reject(new Error(event.message || "분석 워커가 죽었습니다"));
     };
     // 샘플 버퍼는 소유권째 넘긴다 — 4분 곡이면 20MB다
-    worker.postMessage({ samples, sampleRate }, [samples.buffer]);
+    worker.postMessage({ samples, sampleRate, forceBpm }, [samples.buffer]);
   });
 }
 
@@ -162,6 +163,8 @@ export async function analyzeFile(
   env: AnalyzeEnv = {},
   /** 화면을 떠나면 끊는다. 워커를 종료시킨다 */
   signal?: AbortSignal,
+  /** 사용자가 템포 후보를 직접 골랐을 때만 준다 — `AnalysisOptions.forceBpm` */
+  forceBpm?: number,
 ): Promise<AnalysisReport> {
   onProgress?.({ stage: "파일 읽는 중", ratio: 0 });
   const bytes = await file.arrayBuffer();
@@ -179,8 +182,8 @@ export async function analyzeFile(
 
   const worker = (env.makeWorker ?? defaultWorker)();
   // 워커가 없으면 같은 스레드에서 도는데, 그때는 중간에 끊을 자리가 없다
-  if (!worker) return analyzeAudio(samples, sampleRate, forward);
-  return runInWorker(worker, samples, sampleRate, forward, signal);
+  if (!worker) return analyzeAudio(samples, sampleRate, forward, { forceBpm });
+  return runInWorker(worker, samples, sampleRate, forward, signal, forceBpm);
 }
 
 /**

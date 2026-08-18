@@ -72,7 +72,33 @@ export function keyName(tonic: number, mode: Mode): string {
   return mode === "major" ? `${MAJOR_NAMES[pc]} 장조` : `${MINOR_NAMES[pc]} 단조`;
 }
 
-function correlation(a: readonly number[], b: readonly number[]): number {
+/**
+ * 조표에 붙는 임시표 수. 양수면 ♯계. 5도권을 그대로 옮긴 표다.
+ *
+ * **`transcribe/musicxml.ts`에 같은 표가 또 있다.** 층 규칙이 그 둘을 잇는 것을
+ * 금지하므로(`core/analysis`와 `core/transcribe`는 서로를 import하지 않는다)
+ * 어쩔 수 없이 두 벌인데, **조용한 중복이 되지 않게 회귀 시험이 24개 조 전부에서
+ * 두 표가 같은 값을 내는지 본다.** 한쪽만 고치면 코드 심볼의 ♯/♭이 악보의
+ * 음표와 갈린다.
+ *
+ * 여기서 쓰는 곳은 하나다 — 코드 근음을 ♯로 적을지 ♭로 적을지(`chords.rootName`).
+ */
+const MAJOR_FIFTHS = [0, -5, 2, -3, 4, -1, 6, 1, -4, 3, -2, 5];
+const MINOR_FIFTHS = [-3, 4, -1, -6, 1, -4, 3, -2, 5, 0, -5, 2];
+
+export function keyFifths(tonic: number, mode: Mode): number {
+  const pc = ((Math.round(tonic) % 12) + 12) % 12;
+  return mode === "major" ? MAJOR_FIFTHS[pc] : MINOR_FIFTHS[pc];
+}
+
+/**
+ * 피어슨 상관. **코드 인식도 이걸 쓴다**(`chords.ts`) — 그래서 공개돼 있다.
+ *
+ * 코사인이 아니라 상관인 것이 코드 쪽에서는 특히 중요하다. 평균을 빼므로
+ * 12칸이 고르게 깔린 벡터(무음·잡음)가 어떤 템플릿과도 0에 가까운 값을 내고,
+ * 그래야 "코드 없음"의 문턱이 뜻을 갖는다.
+ */
+export function correlation(a: ArrayLike<number>, b: ArrayLike<number>): number {
   const n = a.length;
   let ma = 0;
   let mb = 0;

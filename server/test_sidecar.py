@@ -21,8 +21,9 @@ import numpy as np
 import pytest
 
 from app import main, melody
+from app.health import Check
 from app.audio import Audio, gate, highpass, normalize, process_vocal, resample
-from app.jobs import JobStore, digest_of
+from app.jobs import Cancelled, JobStore, digest_of
 
 RATE = 44_100
 
@@ -231,7 +232,7 @@ def test_probe_reports_every_model_independently():
 
 def test_health_carries_checks(client):
     body = client.get("/health").json()
-    assert set(body["checks"]) == {"stems", "melody"}
+    assert set(body["checks"]) == {"stems", "melody", "structure"}
     for check in body["checks"].values():
         assert check["status"] in {"checking", "ok", "unavailable", "broken"}
 
@@ -408,7 +409,7 @@ def client(tmp_path: Path, monkeypatch):
 def test_health_answers_without_loading_models(client):
     body = client.get("/health").json()
     assert body["ok"] is True
-    assert set(body["models"]) == {"stems", "melody"}
+    assert set(body["models"]) == {"stems", "melody", "structure"}
 
 
 def test_empty_upload_is_rejected(client):
@@ -513,6 +514,115 @@ def test_existing_stems_are_reused(tmp_path: Path):
     # 하나만 없어도 재사용하지 않는다 — 반쯤 남은 디렉터리를 믿으면 안 된다
     (stem_dir / f"{main.stems.STEM_NAMES[0]}.wav").unlink()
     assert main._stem_paths(tmp_path / "슬롯") == {}
+
+
+def test_missing_structure_is_404_not_an_error(client):
+    """구조 모델이 없어도 작업은 성공한다. 없는 것은 404일 뿐이다.
+
+    옛 캐시 슬롯도 같은 상태다 — 웹은 이 404를 "구조 없음"으로 읽고 나머지
+    결과를 그대로 보여준다.
+    """
+    created = client.post(
+        "/jobs", files={"file": ("a.wav", wav_bytes(), "audio/wav")}
+    ).json()
+    job_id = created["jobId"]
+    status = poll(client, job_id)
+    assert status["error"] is None, status["error"]
+
+    meta = client.get(f"/jobs/{job_id}/meta").json()
+    assert "hasStructure" in meta
+    if not meta["hasStructure"]:
+        assert client.get(f"/jobs/{job_id}/structure").status_code == 404
+
+
+def test_structure_failure_does_not_throw_away_the_melody(client, monkeypatch, tmp_path: Path):
+    """구조가 터져도 f0는 나온다.
+
+    구조는 맨 뒤에 붙은 덧붙임이라, 여기서 던지면 수 분짜리 분리와 멜로디까지
+    함께 버려진다. 무엇이 터졌는지는 메타에 남고, **엔진 이름도 함께 남아야**
+    같은 곡을 열 때마다 파이프라인이 통째로 다시 돌지 않는다.
+    """
+    monkeypatch.setattr(main.structure, "available", lambda: True)
+    monkeypatch.setattr(main.probe, "get", lambda name: Check("ok"))
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("가중치가 없다")
+
+    monkeypatch.setattr(main.structure, "analyze", boom)
+
+    data = wav_bytes()
+    created = client.post("/jobs", files={"file": ("a.wav", data, "audio/wav")}).json()
+    status = poll(client, created["jobId"])
+    assert status["error"] is None, "구조 실패가 작업 전체를 죽였다"
+    assert len(client.get(f"/jobs/{created['jobId']}/f0").json()["f0"]) > 0
+
+    meta = client.get(f"/jobs/{created['jobId']}/meta").json()
+    assert meta["hasStructure"] is False
+    assert "가중치가 없다" in meta["structureError"]
+    assert meta["structureEngine"] == main.structure.ENGINE
+
+    # 고쳐지지도 않을 실패 때문에 매번 다시 돌지 않는다
+    again = client.post("/jobs", files={"file": ("a.wav", data, "audio/wav")}).json()
+    assert again["cached"] is True
+
+
+def test_cancelling_during_structure_is_not_a_structure_failure(client, monkeypatch):
+    """취소는 실패가 아니다 — 위 except가 삼키면 안 된다.
+
+    삼키면 두 가지가 한꺼번에 어긋난다: 사용자가 취소를 눌렀는데 작업이 "완료"로
+    끝나고, 그 반쪽짜리 결과가 **캐시에 등록되어** 그 곡은 영영 구조를 못 받는다.
+    실측(2026-08-14)으로 그 상태의 슬롯이 실제로 남았다.
+    """
+    monkeypatch.setattr(main.structure, "available", lambda: True)
+    monkeypatch.setattr(main.probe, "get", lambda name: Check("ok"))
+
+    def cancel_here(*_args, **_kwargs):
+        raise Cancelled
+
+    monkeypatch.setattr(main.structure, "analyze", cancel_here)
+
+    data = wav_bytes()
+    created = client.post("/jobs", files={"file": ("a.wav", data, "audio/wav")}).json()
+    status = poll(client, created["jobId"])
+    assert status["error"] == "취소했습니다", "취소가 완료로 둔갑했다"
+
+    # 캐시에 등록되지 않았어야 한다 — 다시 올리면 처음부터 돈다
+    again = client.post("/jobs", files={"file": ("a.wav", data, "audio/wav")}).json()
+    assert again["cached"] is False
+
+
+def test_other_structure_engine_reuses_the_melody(client, monkeypatch, tmp_path: Path):
+    """구조 엔진만 바뀌면 RMVPE를 다시 돌리지 않는다.
+
+    스템 재사용과 같은 취지다 — 안 그러면 이 무효화가 "고쳤다"가 아니라
+    "곡마다 멜로디를 몇 분씩 다시 뽑는다"가 된다.
+    """
+    data = wav_bytes()
+    created = client.post("/jobs", files={"file": ("a.wav", data, "audio/wav")}).json()
+    poll(client, created["jobId"])
+
+    slot = next(p for p in tmp_path.iterdir() if (p / "meta.json").exists())
+    meta = json.loads((slot / "meta.json").read_text(encoding="utf-8"))
+    meta["hasMelody"] = True
+    meta["melodyEngine"] = main.melody.ENGINE
+    meta["structureEngine"] = "옛날구조모델"
+    (slot / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    curve_before = (slot / "f0.json").read_text(encoding="utf-8")
+
+    monkeypatch.setattr(main.structure, "available", lambda: True)
+    monkeypatch.setattr(main.probe, "get", lambda name: Check("ok"))
+    monkeypatch.setattr(main.structure, "analyze", lambda *a, **k: {"segments": []})
+    called: list[str] = []
+    monkeypatch.setattr(
+        main.melody, "extract_f0", lambda *a, **k: called.append("f0") or {}
+    )
+
+    again = client.post("/jobs", files={"file": ("a.wav", data, "audio/wav")}).json()
+    assert again["cached"] is False, "구조 엔진이 바뀌었으면 다시 돌아야 한다"
+    poll(client, again["jobId"])
+    assert called == [], "멜로디를 다시 뽑았다"
+    assert (slot / "f0.json").read_text(encoding="utf-8") == curve_before
+    assert client.get(f"/jobs/{again['jobId']}/structure").json() == {"segments": []}
 
 
 def test_audio_name_is_allowlisted(client):

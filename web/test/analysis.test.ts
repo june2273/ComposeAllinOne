@@ -15,20 +15,34 @@ import { describe, expect, test } from "vitest";
 import { fft, hann, SpectrumFrames } from "../src/core/analysis/fft";
 import {
   ANALYSIS_RATE,
+  extractChordChroma,
   extractFeatures,
   estimateTuningCents,
   normalizeOnset,
 } from "../src/core/analysis/features";
+import {
+  chordTemplates,
+  estimateChords,
+  rootName,
+  type ChordEvent,
+} from "../src/core/analysis/chords";
+import { keyFifths as scoreKeyFifths } from "../src/core/transcribe/musicxml";
 import {
   estimateTempo,
   halfBeatStrength,
   relatedTempo,
   trackBeats,
 } from "../src/core/analysis/tempo";
-import { beatProfile, estimateMeter, subdivisionOf } from "../src/core/analysis/meter";
+import {
+  beatChroma,
+  beatProfile,
+  estimateMeter,
+  subdivisionOf,
+} from "../src/core/analysis/meter";
 import {
   aggregateChroma,
   estimateKeyFromChroma,
+  keyFifths,
   keyName,
 } from "../src/core/analysis/key";
 import {
@@ -83,6 +97,14 @@ interface TrackOptions {
   beatsPerBar: number;
   /** 마디마다 울릴 화음 (MIDI 번호). 비우면 클릭만 난다 */
   chords?: number[][];
+  /**
+   * 마디마다의 베이스 한 음 (MIDI 번호). E2~G3(82~196Hz) 안에 두면
+   * `extractChordChroma`의 베이스 대역에 잡힌다.
+   *
+   * **음고류 집합이 같은 코드를 가르는 유일한 단서다** — `Dm7`(D F A C)과
+   * `F6`(F A C D)은 위쪽만 봐서는 같은 것이라 근음이 아래에 있어야 갈린다.
+   */
+  bass?: number[];
   /** 박 사이에 넣을 8분음표. "straight" | "swing" | null */
   eighths?: "straight" | "swing" | null;
   cents?: number;
@@ -97,7 +119,7 @@ interface TrackOptions {
 
 /** 클릭 트랙 + 화음. 답을 아는 신호. */
 function makeTrack(options: TrackOptions): Float32Array {
-  const { bpm, bars, beatsPerBar, chords, eighths = null, cents = 0, beatGains } = options;
+  const { bpm, bars, beatsPerBar, chords, bass, eighths = null, cents = 0, beatGains } = options;
   const beat = 60 / bpm;
   const total = bars * beatsPerBar * beat + 1;
   const out = new Float32Array(Math.round(total * ANALYSIS_RATE));
@@ -113,14 +135,18 @@ function makeTrack(options: TrackOptions): Float32Array {
         click(out, at + offset, 0.3, rng);
       }
     }
+    const from = bar * beatsPerBar * beat;
     if (chords?.length) {
       const chord = chords[bar % chords.length];
-      const from = bar * beatsPerBar * beat;
       for (const midi of chord) {
         // 배음을 두 개 얹어야 크로마 하한(200Hz) 위로 에너지가 올라온다
         tone(out, from, from + beatsPerBar * beat, midiToFreq(midi, cents), 0.28);
         tone(out, from, from + beatsPerBar * beat, midiToFreq(midi + 12, cents), 0.14);
       }
+    }
+    if (bass?.length) {
+      const root = bass[bar % bass.length];
+      tone(out, from, from + beatsPerBar * beat, midiToFreq(root, cents), 0.45);
     }
   }
   return out;
@@ -604,6 +630,188 @@ describe("조성", () => {
   });
 });
 
+// --- 코드 -----------------------------------------------------------------------
+
+describe("코드 인식", () => {
+  /**
+   * 합성 트랙 → 코드. `meterOf`와 같은 결선이고, `analyzeAudio`가 실제로
+   * 하는 것과 같은 순서다(특징 → 템포 → 비트 → 박자 → 코드).
+   */
+  function chordsOf(options: TrackOptions): readonly ChordEvent[] {
+    const samples = makeTrack(options);
+    const features = extractFeatures(samples, ANALYSIS_RATE);
+    const onset = normalizeOnset(features.onset, features.fps);
+    const tempo = estimateTempo(onset, features.fps);
+    const track = trackBeats(onset, features.fps, tempo.bpm);
+    const meter = estimateMeter(
+      track.beats,
+      features.fps,
+      features.onset,
+      features.low,
+      features.chroma,
+    );
+    const chroma = extractChordChroma(samples, ANALYSIS_RATE, features.tuningCents);
+    return estimateChords(track.beats, chroma.fps, chroma.chroma, chroma.energy, {
+      beatsPerBar: meter.beatsPerBar,
+      phase: meter.phase,
+      bass: chroma.bass,
+    }).chords;
+  }
+
+  /** 이어지는 같은 심볼을 접는다. 몇 번 반복됐는지가 아니라 순서가 궁금하다 */
+  function progression(chords: readonly ChordEvent[]): string[] {
+    return chords.map((c) => c.symbol);
+  }
+
+  test("I–V–vi–IV를 그대로 딴다", () => {
+    const chords = chordsOf({
+      bpm: 120,
+      bars: 8,
+      beatsPerBar: 4,
+      chords: C_MAJOR_PROGRESSION,
+    });
+    expect(progression(chords)).toEqual([
+      "C", "G", "Am", "F", "C", "G", "Am", "F",
+    ]);
+  });
+
+  /**
+   * **이것이 크로마 창을 8192로 넓힌 이유다.** 옛 크로마는 하한이 200Hz라
+   * E2(82Hz)·A2(110Hz)가 통째로 빠졌다 — 대중음악 베이스가 사는 자리다.
+   */
+  test("베이스 음역(E2·A2)의 근음도 잡는다", () => {
+    const chords = chordsOf({
+      bpm: 120,
+      bars: 8,
+      beatsPerBar: 4,
+      // E2 B2 G♯3 = E장조 · A2 E3 C♯4 = A장조. 전부 옛 하한 아래에서 시작한다
+      chords: [
+        [40, 47, 56],
+        [45, 52, 61],
+      ],
+    });
+    expect(progression(chords)).toEqual(["E", "A", "E", "A", "E", "A", "E", "A"]);
+  });
+
+  /**
+   * 왕도진행(사양서 §1.5) — 7화음을 빼면 표현되지 않는 진행이다.
+   *
+   * **베이스가 있어야 풀린다.** `Em7`(E G B D)은 `G` 템플릿에도 `Em` 템플릿에도
+   * 4음 중 3개가 맞아 음고류만으로는 동점이고, 가르는 것은 맨 아래 음뿐이다.
+   */
+  test("왕도진행 IVM7–V7–iii7–vi", () => {
+    const chords = chordsOf({
+      bpm: 120,
+      bars: 8,
+      beatsPerBar: 4,
+      chords: [
+        [65, 69, 72, 76], // FM7
+        [67, 71, 74, 77], // G7
+        [64, 67, 71, 74], // Em7
+        [69, 72, 76], // Am
+      ],
+      bass: [41, 43, 40, 45], // F2 G2 E2 A2
+    });
+    expect(progression(chords)).toEqual([
+      "FM7", "G7", "Em7", "Am", "FM7", "G7", "Em7", "Am",
+    ]);
+  });
+
+  /**
+   * `Dm7`(D F A C)과 `F6`(F A C D)은 **같은 음 집합**이다. 위쪽만 보면
+   * 원리적으로 못 가르고(실측: 베이스가 없으면 `F`로 나온다) 근음이 정한다.
+   */
+  test("음 집합이 같은 코드는 베이스가 가른다 — Dm7 대 F", () => {
+    const options: TrackOptions = {
+      bpm: 120,
+      bars: 8,
+      beatsPerBar: 4,
+      chords: [
+        [69, 72, 76], // Am
+        [62, 65, 69, 72], // Dm7 ≡ F6
+      ],
+    };
+    expect(progression(chordsOf(options))).toContain("F");
+    expect(progression(chordsOf({ ...options, bass: [45, 38] }))).toEqual([
+      "Am", "Dm7", "Am", "Dm7", "Am", "Dm7", "Am", "Dm7",
+    ]);
+  });
+
+  test("소리가 없는 구간에는 코드를 세우지 않는다", () => {
+    const samples = makeTrack({
+      bpm: 120,
+      bars: 8,
+      beatsPerBar: 4,
+      chords: C_MAJOR_PROGRESSION,
+    });
+    // 3~4마디를 지운다 — 간주처럼. 클릭까지 함께 사라진다
+    samples.fill(0, Math.round(4 * ANALYSIS_RATE), Math.round(8 * ANALYSIS_RATE));
+    const features = extractFeatures(samples, ANALYSIS_RATE);
+    const onset = normalizeOnset(features.onset, features.fps);
+    const tempo = estimateTempo(onset, features.fps);
+    const track = trackBeats(onset, features.fps, tempo.bpm);
+    const chroma = extractChordChroma(samples, ANALYSIS_RATE, features.tuningCents);
+    const { chords } = estimateChords(
+      track.beats,
+      chroma.fps,
+      chroma.chroma,
+      chroma.energy,
+      { beatsPerBar: 4, phase: 3, bass: chroma.bass },
+    );
+    // 지운 구간(4~8초)을 덮는 코드가 없어야 한다
+    const covering = chords.filter((c) => c.startSec < 7.5 && c.endSec > 4.5);
+    expect(covering).toHaveLength(0);
+    expect(chords.length).toBeGreaterThan(0);
+  });
+
+  test("비트가 모자라면 조용히 빈 결과다", () => {
+    const empty = estimateChords([0, 1], 10, new Float32Array(12 * 20), new Float32Array(20));
+    expect(empty.chords).toEqual([]);
+    expect(empty.confidence).toBe(0);
+  });
+
+  test("템플릿은 24개 — 장 12 · 단 12", () => {
+    const templates = chordTemplates();
+    expect(templates).toHaveLength(24);
+    // C장 = C E G
+    const c = templates.find((t) => t.root === 0 && t.quality === "maj")!;
+    expect([...c.vector]).toEqual([1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0]);
+    // A단 = A C E
+    const am = templates.find((t) => t.root === 9 && t.quality === "min")!;
+    expect([...am.vector]).toEqual([1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0]);
+  });
+
+  test("근음 표기는 조표 방향을 따른다", () => {
+    expect(rootName(6, 2)).toBe("F♯"); // ♯계
+    expect(rootName(6, -2)).toBe("G♭"); // ♭계
+    expect(rootName(10, -3)).toBe("B♭");
+    expect(rootName(0, 0)).toBe("C");
+  });
+
+  /**
+   * **조표 표가 두 벌이다.** 층 규칙이 `core/analysis`와 `core/transcribe`를
+   * 잇는 것을 금지해서 어쩔 수 없는데, 한쪽만 고치면 화면의 코드 심볼과
+   * 악보의 음표가 서로 다른 방향(♯/♭)으로 적힌다. 24개 조 전부를 못박는다.
+   */
+  test("조표 표가 두 층에서 같은 값을 낸다", () => {
+    for (let tonic = 0; tonic < 12; tonic += 1) {
+      for (const mode of ["major", "minor"] as const) {
+        expect(keyFifths(tonic, mode)).toBe(scoreKeyFifths(tonic, mode));
+      }
+    }
+  });
+
+  test("비트 동기 크로마는 비트 수보다 하나 적다", () => {
+    // 프레임 4개, 비트 3개(= 구간 2개)
+    const chroma = new Float32Array(12 * 4);
+    for (let t = 0; t < 4; t += 1) chroma[t * 12 + (t < 2 ? 0 : 7)] = 1;
+    const vectors = beatChroma([0, 2, 4], 1, chroma);
+    expect(vectors).toHaveLength(2);
+    expect(vectors[0][0]).toBeGreaterThan(0); // 앞 구간은 C
+    expect(vectors[1][7]).toBeGreaterThan(0); // 뒤 구간은 G
+  });
+});
+
 // --- 전체 -----------------------------------------------------------------------
 
 describe("analyzeAudio — 전체 통과", () => {
@@ -615,10 +823,35 @@ describe("analyzeAudio — 전체 통과", () => {
   });
   const report = analyzeAudio(samples, ANALYSIS_RATE);
 
-  test("BPM·박자·조성이 한 번에 나온다", () => {
+  test("BPM·박자·조성·코드가 한 번에 나온다", () => {
     expect(report.tempo.bpm).toBeCloseTo(128, 0);
     expect(report.meter.value).toBe("4/4");
     expect(report.key.name).toBe("C 장조");
+    expect(report.chords.map((c) => c.symbol).slice(0, 4)).toEqual([
+      "C", "G", "Am", "F",
+    ]);
+  });
+
+  test("코드 구간은 시각 순서대로 겹치지 않는다", () => {
+    let previous = -1;
+    for (const chord of report.chords) {
+      expect(chord.startSec).toBeGreaterThanOrEqual(previous);
+      expect(chord.endSec).toBeGreaterThan(chord.startSec);
+      expect(chord.endBeat).toBeGreaterThan(chord.startBeat);
+      previous = chord.endSec;
+    }
+  });
+
+  /**
+   * `AnalysisReport`는 워커 경계를 structured clone으로 넘는다
+   * (`platform/analysis.worker.ts`). 복제되지 않는 값이 하나라도 섞이면
+   * 분석이 통째로 실패하는데, 그 실패는 **워커가 있는 환경에서만** 난다.
+   */
+  test("코드가 붙어도 보고서는 그대로 복제된다", () => {
+    const copy = structuredClone(report);
+    expect(copy.chords.map((c) => c.symbol)).toEqual(
+      report.chords.map((c) => c.symbol),
+    );
   });
 
   test("길이와 비트 수가 서로 맞는다", () => {
@@ -652,6 +885,8 @@ describe("analyzeAudio — 전체 통과", () => {
     const empty = analyzeAudio(new Float32Array(0), ANALYSIS_RATE);
     expect(empty.beats).toHaveLength(0);
     expect(empty.tempo.bpm).toBe(0);
+    expect(empty.chords).toEqual([]);
+    expect(empty.chordConfidence).toBe(0);
   });
 
   test("조율이 틀어진 음원도 조성을 맞힌다 — 크로마 전에 되민다", () => {
@@ -822,6 +1057,28 @@ describe("2/4가 나오면 템포 절반을 의심한다", () => {
     const fast = { beats, bpm: 150, steadiness: 1 };
     expect(
       resolveDupleMeter(onset, 100, tempoWith(300, 0.9), fast, meterOfBar(2), solves),
+    ).toBeNull();
+  });
+
+  /**
+   * **반박이 비어 있으면 2/4 신고를 믿지 않는다** (실측 2026-08-18).
+   *
+   * 이 게이트가 없어서 실제로 틀렸다. 평가셋의 `곡F`와 `곡F (MR)`는
+   * **반주가 같은 곡**인데 81.8 대 164.0(정확히 2.005배)이 나왔다 — 자기상관은
+   * 둘 다 82.0으로 맞혔고, 멜로디를 지운 MR 쪽만 노벨티가 성겨져 축 B가 2를
+   * 골랐으며, 이 함수가 그 2/4를 "템포가 절반"으로 읽어 두 배로 올렸다.
+   *
+   * 반박 세기가 갈라 준다 — 제대로 두 배가 된 세 곡은 0.528 · 0.638 · 0.600인데
+   * 이 오검출만 0.334였다. **문턱을 새로 만들 필요가 없었다**: `resolveOctave`가
+   * 이미 쓰던 `HALF_BEAT_STRONG`(0.4)이 그대로 가른다.
+   */
+  test("반박 자리가 비어 있으면 2/4여도 올리지 않는다", () => {
+    // 박 자리에만 소리가 있다(0.5초마다). 반박(0.25초 자리)은 완전히 비었다
+    const sparse = new Float32Array(2000);
+    for (let i = 0; i < 40; i += 1) sparse[i * 50] = 1;
+    expect(halfBeatStrength(sparse, 100, beats)).toBeLessThan(0.4);
+    expect(
+      resolveDupleMeter(sparse, 100, tempoWith(120, 0.5), track, meterOfBar(2), solves),
     ).toBeNull();
   });
 });

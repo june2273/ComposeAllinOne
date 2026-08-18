@@ -1103,6 +1103,157 @@ describe("4. MusicXML", () => {
     expect(xml).toContain("<beats>3</beats>");
     expect(measureSums(xml)).toEqual([12]);
   });
+
+  // --- 코드 심볼 ---------------------------------------------------------------
+
+  describe("코드 심볼", () => {
+    /** 4분음표 여덟 개 = 두 마디. 자리를 세기 쉬운 바탕이다 */
+    const notes: NoteEvent[] = Array.from({ length: 8 }, (_, i) => ({
+      midi: 60,
+      startSec: i * 0.5,
+      endSec: i * 0.5 + 0.5,
+      velocity: 80,
+      centsOffset: 0,
+    }));
+    const quantized = quantizeNotes(notes, grid);
+
+    test("마디마다 첫 음표 앞에 붙는다", () => {
+      const xml = toMusicXml(quantized, {
+        beatsPerBar: 4,
+        stepsPerBeat: 4,
+        // 한 마디는 16칸이다(stepsPerBeat 4 × 4박) — 칸 번호는 박이 아니다
+        harmony: [
+          { step: 0, root: 0, kind: "major", text: "" },
+          { step: 16, root: 7, kind: "dominant", text: "7" },
+        ],
+      });
+      const bars = [...xml.matchAll(/<measure\b[^>]*>(.*?)<\/measure>/gsu)];
+      expect(bars).toHaveLength(2);
+      // 각 마디의 <harmony>가 그 마디 첫 <note>보다 앞이다
+      for (const [, body] of bars) {
+        expect(body.indexOf("<harmony")).toBeGreaterThanOrEqual(0);
+        expect(body.indexOf("<harmony")).toBeLessThan(body.indexOf("<note>"));
+      }
+      expect(bars[0][1]).toContain("<root-step>C</root-step>");
+      expect(bars[0][1]).toContain('<kind text="">major</kind>');
+      expect(bars[1][1]).toContain("<root-step>G</root-step>");
+      expect(bars[1][1]).toContain('<kind text="7">dominant</kind>');
+    });
+
+    /**
+     * **`<harmony>`는 시간을 소비하지 않는다.** 마디 안 음가 합이 흔들리면
+     * verovio가 그 마디부터 조용히 밀린다.
+     */
+    test("음가 합을 바꾸지 않는다", () => {
+      const plain = toMusicXml(quantized, { beatsPerBar: 4, stepsPerBeat: 4 });
+      const withChords = toMusicXml(quantized, {
+        beatsPerBar: 4,
+        stepsPerBeat: 4,
+        harmony: [
+          { step: 0, root: 0, kind: "major", text: "" },
+          { step: 2, root: 5, kind: "major", text: "" },
+          { step: 4, root: 7, kind: "dominant", text: "7" },
+        ],
+      });
+      expect(measureSums(withChords)).toEqual(measureSums(plain));
+    });
+
+    /**
+     * 코드가 음표 머리에 안 떨어지면 `<offset>`으로 민다. 기준은 **지금 커서**,
+     * 즉 바로 뒤 음표의 자리다.
+     */
+    test("음표 사이에 떨어지면 offset으로 민다", () => {
+      // 온음표 하나뿐인 마디 — 2박째에 코드가 온다
+      const whole: NoteEvent[] = [
+        { midi: 60, startSec: 0, endSec: 2, velocity: 80, centsOffset: 0 },
+      ];
+      const xml = toMusicXml(quantizeNotes(whole, grid), {
+        beatsPerBar: 4,
+        stepsPerBeat: 4,
+        harmony: [{ step: 8, root: 5, kind: "minor", text: "m" }],
+      });
+      // 칸 8 = 2박 = divisions 8. 마디 머리의 커서에서 8만큼 떨어져 있다
+      expect(xml).toContain("<offset>8</offset>");
+      expect(xml).toContain("<root-step>F</root-step>");
+      // 자식 순서는 규격이다 — root → kind → offset
+      expect(xml).toMatch(/<root>.*<kind[^>]*>.*<\/kind><offset>/su);
+    });
+
+    test("머리에 정확히 떨어지면 offset을 안 낸다", () => {
+      const xml = toMusicXml(quantized, {
+        beatsPerBar: 4,
+        stepsPerBeat: 4,
+        harmony: [{ step: 0, root: 0, kind: "major", text: "" }],
+      });
+      expect(xml).not.toContain("<offset>");
+    });
+
+    /**
+     * **근음 표기는 음표와 같은 규칙을 따라야 한다.** 악보 위의 `G♭`과 오선
+     * 위의 `F♯`이 같은 음을 가리키면 읽는 사람이 둘 중 하나를 오타로 읽는다.
+     */
+    test("♭계 조에서는 근음도 ♭로 적는다", () => {
+      const sharp = toMusicXml(quantized, {
+        beatsPerBar: 4,
+        stepsPerBeat: 4,
+        fifths: 2,
+        harmony: [{ step: 0, root: 6, kind: "major", text: "" }],
+      });
+      expect(sharp).toContain("<root-step>F</root-step><root-alter>1</root-alter>");
+
+      const flat = toMusicXml(quantized, {
+        beatsPerBar: 4,
+        stepsPerBeat: 4,
+        fifths: -2,
+        harmony: [{ step: 0, root: 6, kind: "major", text: "" }],
+      });
+      expect(flat).toContain("<root-step>G</root-step><root-alter>-1</root-alter>");
+    });
+
+    /**
+     * 단조의 이끎음 예외(`spellingFor`)는 **선율 표기 규칙**이다. 근음에 걸면
+     * D단조에서 근음 D♭이 C♯으로 바뀌는 엉뚱한 일이 난다.
+     */
+    test("근음에는 단조 이끎음 예외를 걸지 않는다", () => {
+      const xml = toMusicXml(quantized, {
+        beatsPerBar: 4,
+        stepsPerBeat: 4,
+        key: { tonic: 2, mode: "minor" }, // D단조 → ♭계(fifths −1)
+        harmony: [{ step: 0, root: 1, kind: "major", text: "" }],
+      });
+      expect(xml).toContain("<root-step>D</root-step><root-alter>-1</root-alter>");
+      expect(xml).not.toContain("<root-step>C</root-step><root-alter>1</root-alter>");
+    });
+
+    test("근음이 흰건반이면 root-alter를 안 낸다", () => {
+      const xml = toMusicXml(quantized, {
+        beatsPerBar: 4,
+        stepsPerBeat: 4,
+        harmony: [{ step: 0, root: 4, kind: "minor", text: "m" }],
+      });
+      expect(xml).toContain("<root><root-step>E</root-step></root>");
+      expect(xml).not.toContain("<root-alter>");
+    });
+
+    test("코드를 안 주면 <harmony>가 아예 안 나간다", () => {
+      const xml = toMusicXml(quantized, { beatsPerBar: 4, stepsPerBeat: 4 });
+      expect(xml).not.toContain("<harmony");
+    });
+
+    /**
+     * 악보 범위 밖의 코드가 통째로 사라지면 곡의 첫 코드가 없어진다 —
+     * 비트가 첫 다운비트보다 앞서면 칸 번호가 음수가 된다.
+     */
+    test("첫 마디보다 앞선 코드는 버리지 않고 당긴다", () => {
+      const xml = toMusicXml(quantized, {
+        beatsPerBar: 4,
+        stepsPerBeat: 4,
+        harmony: [{ step: -3, root: 9, kind: "minor", text: "m" }],
+      });
+      expect(xml).toContain("<root-step>A</root-step>");
+      expect(measureSums(xml)).toEqual([16, 16]);
+    });
+  });
 });
 
 // --- 종단 -------------------------------------------------------------------
@@ -1128,6 +1279,58 @@ describe("5. transcribe() 종단", () => {
     expect(result.quantized.map((n) => n.startStep)).toEqual([0, 4, 8, 12]);
     expect(result.fifths).toBe(0);
     for (const sum of measureSums(result.musicXml)) expect(sum).toBe(16);
+  });
+
+  /**
+   * **코드는 초로 들어와 격자 칸이 되어 나간다.** 호출부가 자기 격자를 짐작해
+   * 칸 번호를 계산하면 두 격자가 갈려 코드가 음표와 다른 자리에 앉는다.
+   */
+  test("코드를 주면 악보에 심볼이 얹힌다 — 초가 격자 칸이 된다", () => {
+    const curve = curveOf([
+      [0.5, 60],
+      [0.5, 62],
+      [0.5, 64],
+      [0.5, 65],
+    ]);
+    const result = transcribe(curve, {
+      bpm: 120,
+      beats,
+      downbeats,
+      beatsPerBar: 4,
+      key: { tonic: 0, mode: "major" },
+      // 0초 = 첫 다운비트, 1초 = 3박째
+      chords: [
+        { atSec: 0, root: 0, kind: "major", text: "" },
+        { atSec: 1, root: 5, kind: "major", text: "" },
+      ],
+    });
+    expect(result.musicXml).toContain("<root-step>C</root-step>");
+    expect(result.musicXml).toContain("<root-step>F</root-step>");
+    // 1초 = 3박째. 거기 4분음표가 하나 서 있으므로 **그 음표 바로 앞**에
+    // 붙고 `<offset>`은 필요 없다(음표가 없는 자리일 때만 민다).
+    const notes = [...result.musicXml.matchAll(/<harmony|<note>/gu)].map((m) => m[0]);
+    expect(notes).toEqual(["<harmony", "<note>", "<note>", "<harmony", "<note>", "<note>"]);
+    expect(result.musicXml).not.toContain("<offset>");
+    // 음가 합은 그대로여야 한다
+    for (const sum of measureSums(result.musicXml)) expect(sum).toBe(16);
+  });
+
+  /**
+   * **가창 합성기용 파일에는 코드를 넣지 않는다.** 신스V가 읽는 것은 음표와
+   * 음절이고, 코드 심볼은 거기서 쓰이지 않는다 — 화면 악보에 `la`를 안 거는
+   * 것과 같은 방침이다.
+   */
+  test("코드는 악보에만, 가사판에는 안 들어간다", () => {
+    const result = transcribe(curveOf([[0.5, 60]]), {
+      bpm: 120,
+      beats,
+      downbeats,
+      beatsPerBar: 4,
+      chords: [{ atSec: 0, root: 0, kind: "major", text: "" }],
+    });
+    expect(result.musicXml).toContain("<harmony");
+    expect(result.vocalXml).not.toContain("<harmony");
+    expect(result.vocalXml).toContain("<lyric>");
   });
 
   test("체계적으로 늦게 부른 노래도 정박으로 적힌다", () => {

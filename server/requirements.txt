@@ -26,6 +26,16 @@ soundfile
 demucs                    # 스템 분리 (htdemucs)
 rmvpe-onnx                # 멜로디 f0. 가중치 362MB는 첫 사용 때 따로 받는다
 
+# 곡 구조(구간·라벨). madmom은 PyPI 배포가 낡아 git에서 받아야 한다.
+# **natten을 반드시 핀할 것** — 0.21은 allin1이 쓰는 분리형 API(rpb를 받는
+# `natten1dqkrpb`)를 없앴고, 원래 버전인 0.14.6은 지금 torch 헤더에서 컴파일이
+# 깨진다. 0.17.5만 둘 다 만족한다(app/structure.py 첫 주석에 실측이 있다).
+# 소스 빌드라 `--no-build-isolation`이 필요하다:
+#   pip install --no-build-isolation "natten==0.17.5"
+allin1
+natten==0.17.5
+madmom @ git+https://github.com/CPJKU/madmom
+
 # --- 개발 전용 ---------------------------------------------------------------
 pytest
 httpx                     # fastapi의 TestClient가 쓴다

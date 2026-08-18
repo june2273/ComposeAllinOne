@@ -32,6 +32,7 @@ import {
 import {
   type OnsetCurve,
   toMidiFiles,
+  toSvp,
   transcribe,
   type PitchCurve,
 } from "../../src/core/transcribe";
@@ -133,9 +134,20 @@ test("캐시된 곡의 f0 커브를 전부 MIDI로 굽는다", { timeout: 30 * 6
       });
       writeFileSync(join(OUT_DIR, `${name}-performed.mid`), midi.performed);
       writeFileSync(join(OUT_DIR, `${name}-quantized.mid`), midi.quantized);
+      // 피치 커브까지 나가야 앱이 내는 것과 같은 산출물이 된다
+      const svp = toSvp(result, {
+        title: name,
+        bpm: report.tempo.bpm,
+        key: { tonic: report.key.tonic, mode: report.key.mode },
+      });
+      writeFileSync(join(OUT_DIR, `${name}.svp`), svp);
+      const points = (JSON.parse(svp) as {
+        library: { pitchControls: unknown[] }[];
+      }).library[0].pitchControls.length;
 
       rows.push(
         `${name}: 음표 ${result.notes.length} · 격자 ${result.quantized.length} · ` +
+          `컨트롤점 ${points} · ` +
           `드리프트 ${result.offsetMs.toFixed(0)}ms · 조율보정 ${result.tuningCents.toFixed(1)}센트`,
       );
       // 진행 상황을 바로 보여 준다 — 곡당 수십 초라 끝까지 침묵하면 멈춘 줄 안다

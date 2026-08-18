@@ -108,8 +108,13 @@ function zscore(values: Float64Array): Float64Array {
   return out;
 }
 
-/** 비트 구간마다 값을 모아 비트 길이 수열로 만든다. */
-function perBeat(
+/**
+ * 비트 구간마다 값을 모아 비트 길이 수열로 만든다.
+ *
+ * **코드 인식도 이걸 쓴다**(`chords.ts`가 비트별 에너지를 낼 때) — 그래서
+ * 공개돼 있다. 순수 합이라 도메인을 모른다.
+ */
+export function perBeat(
   beats: readonly number[],
   fps: number,
   frame: Float32Array,
@@ -125,23 +130,73 @@ function perBeat(
   return out;
 }
 
+/**
+ * **비트 동기 크로마** — 비트 구간마다 크로마를 모아 12차원 하나로 만든다.
+ *
+ * 사양서 §1.1이 못박은 순서의 앞쪽이다: 코드 인식은 프레임이 아니라 **여기
+ * 위에서** 돈다. 비트 안이 균질해지고, Viterbi가 볼 길이가 프레임 수에서 비트
+ * 수로 줄어든다(보통 20~40배).
+ * 출처: Bartsch & Wakefield, WASPAA 2001.
+ *
+ * 길이는 `beats.length - 1`이다 — 마지막 비트는 다음 비트가 없어 구간을 못 만든다.
+ *
+ * `weight`를 주면 프레임마다 그만큼 가중해 더한다. **코드 쪽이 이걸 쓴다** —
+ * 코드용 크로마는 프레임마다 정규화되어 있어 무음과 큰 소리가 구별되지 않고,
+ * 그대로 평균하면 잔향 꼬리가 어택과 같은 무게를 갖는다. 박자 쪽은 안 준다
+ * (지금 동작을 그대로 두기 위해서다).
+ *
+ * `taper`는 비트 **안쪽**을 더 믿는다. 아래 절 참조 — 이것도 코드 쪽만 켠다.
+ */
+export function beatChroma(
+  beats: readonly number[],
+  fps: number,
+  chroma: Float32Array,
+  weight?: Float32Array,
+  taper = false,
+): Float64Array[] {
+  const count = Math.max(0, beats.length - 1);
+  const frames = Math.floor(chroma.length / 12);
+  const vectors: Float64Array[] = [];
+  for (let i = 0; i < count; i += 1) {
+    const from = Math.max(0, Math.round(beats[i] * fps));
+    const to = Math.min(frames, Math.round(beats[i + 1] * fps));
+    const span = to - from;
+    const v = new Float64Array(12);
+    for (let t = from; t < to; t += 1) {
+      let w = weight ? weight[t] : 1;
+      if (taper && span > 1) w *= bell((t - from) / (span - 1));
+      if (w <= 0) continue;
+      for (let pc = 0; pc < 12; pc += 1) v[pc] += chroma[t * 12 + pc] * w;
+    }
+    vectors.push(v);
+  }
+  return vectors;
+}
+
+/**
+ * 비트 안 위치(0~1)의 무게. 양 끝에서 0, 가운데서 1인 종 모양(Hann).
+ *
+ * **STFT 창이 비트보다 짧지 않기 때문에 필요하다.** 코드용 창은 371ms인데
+ * 120BPM의 한 박은 500ms다 — 비트 머리에 놓인 프레임은 창의 절반(186ms)이
+ * **앞 비트**에 걸쳐 있어서 이전 코드를 함께 본다.
+ *
+ * 실측(합성 `FM7·G7·Em7·Am7` 트랙): 이게 없으면 마디 첫 비트가 앞 코드로
+ * 잡혀 `G7`과 `Em7`이 한 덩어리 `G`로 뭉갰다. 자르지 않고 무게로 낮추는
+ * 이유는 빠른 곡에서 비트가 창보다 짧아지면 자를 프레임이 하나도 안 남기
+ * 때문이다 — 무게는 그때도 상대적으로 가운데를 고른다.
+ */
+function bell(position: number): number {
+  return 0.5 - 0.5 * Math.cos(2 * Math.PI * Math.min(1, Math.max(0, position)));
+}
+
 /** 비트 구간의 평균 크로마끼리 얼마나 달라졌는가 (0=같음, 1=직교). */
 function chromaChange(
   beats: readonly number[],
   fps: number,
   chroma: Float32Array,
 ): Float64Array {
-  const count = Math.max(0, beats.length - 1);
-  const vectors: Float64Array[] = [];
-  for (let i = 0; i < count; i += 1) {
-    const from = Math.max(0, Math.round(beats[i] * fps));
-    const to = Math.min(chroma.length / 12, Math.round(beats[i + 1] * fps));
-    const v = new Float64Array(12);
-    for (let t = from; t < to; t += 1) {
-      for (let pc = 0; pc < 12; pc += 1) v[pc] += chroma[t * 12 + pc];
-    }
-    vectors.push(v);
-  }
+  const vectors = beatChroma(beats, fps, chroma);
+  const count = vectors.length;
 
   const out = new Float64Array(count);
   for (let i = 1; i < count; i += 1) {
@@ -207,10 +262,81 @@ export function subdivisionOf(profile: Float64Array): {
 }
 
 /**
+ * 박마다의 "새로움" — 온셋 · 저역(킥) · 화성 변화를 각각 z점수로 맞춰 더한 것.
+ *
+ * 셋을 z점수로 맞추고 더하는 이유는 단위가 제각각이기 때문이다(플럭스 · 진폭 ·
+ * 코사인 거리). 합의 표준편차가 대략 √3이 되므로 `barEffect`가 그걸로 나눠
+ * 효과크기를 만든다.
+ *
+ * **축 B가 쓰는 재료이지만 축 B만의 것은 아니다.** 같은 노벨티에 마디 길이 8을
+ * 물어보면 "우리 박이 두 배 빠른가"를 알 수 있다(`index.resolveHalfTempo`) —
+ * 그래서 `estimateMeter` 안에 가둬 두지 않고 꺼내 두었다.
+ */
+export function beatNovelty(
+  beats: readonly number[],
+  fps: number,
+  onset: Float32Array,
+  low: Float32Array,
+  chroma: Float32Array,
+): Float64Array {
+  const onsetZ = zscore(perBeat(beats, fps, onset));
+  const lowZ = zscore(perBeat(beats, fps, low));
+  const changeZ = zscore(chromaChange(beats, fps, chroma));
+  const novelty = new Float64Array(onsetZ.length);
+  for (let i = 0; i < novelty.length; i += 1) {
+    novelty[i] = onsetZ[i] + lowZ[i] + changeZ[i];
+  }
+  return novelty;
+}
+
+/** (마디 길이, 위상)마다 "다운비트 자리가 나머지보다 얼마나 높은가" */
+function effectAt(novelty: Float64Array, bar: number, phase: number): number {
+  let onSum = 0;
+  let onCount = 0;
+  let offSum = 0;
+  let offCount = 0;
+  for (let i = 0; i < novelty.length; i += 1) {
+    if ((((i - phase) % bar) + bar) % bar === 0) {
+      onSum += novelty[i];
+      onCount += 1;
+    } else {
+      offSum += novelty[i];
+      offCount += 1;
+    }
+  }
+  if (onCount === 0 || offCount === 0) return 0;
+  // novelty는 z점수 셋의 합이라 표준편차가 대략 √3이다. 나눠서 효과 크기로.
+  return (onSum / onCount - offSum / offCount) / Math.sqrt(3);
+}
+
+/**
+ * 마디 길이 `bar`가 노벨티를 얼마나 잘 설명하는가 — 가장 좋은 위상과 그 효과크기.
+ *
+ * 위상은 전부 훑는다(`bar`개뿐이다). 동점이면 작은 위상이 이긴다.
+ */
+export function barEffect(
+  novelty: Float64Array,
+  bar: number,
+): { phase: number; score: number } {
+  let best = { phase: 0, score: -Infinity };
+  for (let phase = 0; phase < bar; phase += 1) {
+    const score = effectAt(novelty, bar, phase);
+    if (score > best.score) best = { phase, score };
+  }
+  return best;
+}
+
+/**
  * 박자표 추정. `beats`는 `trackBeats()`의 출력이다.
  *
  * 축 B는 스코프대로 3·4만 본다. 5/4·7/8이 필요해지면 이 배열만 늘리면 되지만,
  * 6을 넣지는 말 것 — 그건 축 B가 아니라 축 A의 물음이다.
+ *
+ * **8도 넣지 말 것.** 8박 마디는 "진짜 마디"가 아니라 **우리 박이 두 배
+ * 빠르다는 신고**라, 박자표의 답이 아니라 템포 교정의 입력이다(2/4를 그렇게
+ * 다루는 것과 같다). 후보 목록에 넣으면 화면에 `8/4`가 뜨고 마진을 다시
+ * 맞춰야 한다 — `index.resolveHalfTempo`가 `barEffect(novelty, 8)`을 직접
+ * 부르는 이유다.
  */
 export function estimateMeter(
   beats: readonly number[],
@@ -233,33 +359,7 @@ export function estimateMeter(
   };
   if (beats.length < 8) return fallback;
 
-  const onsetZ = zscore(perBeat(beats, fps, onset));
-  const lowZ = zscore(perBeat(beats, fps, low));
-  const changeZ = zscore(chromaChange(beats, fps, chroma));
-  const novelty = new Float64Array(onsetZ.length);
-  for (let i = 0; i < novelty.length; i += 1) {
-    novelty[i] = onsetZ[i] + lowZ[i] + changeZ[i];
-  }
-
-  // (마디 길이, 위상)마다 "다운비트 자리가 나머지보다 얼마나 높은가"
-  const effect = (bar: number, phase: number): number => {
-    let onSum = 0;
-    let onCount = 0;
-    let offSum = 0;
-    let offCount = 0;
-    for (let i = 0; i < novelty.length; i += 1) {
-      if (((i - phase) % bar + bar) % bar === 0) {
-        onSum += novelty[i];
-        onCount += 1;
-      } else {
-        offSum += novelty[i];
-        offCount += 1;
-      }
-    }
-    if (onCount === 0 || offCount === 0) return 0;
-    // novelty는 z점수 셋의 합이라 표준편차가 대략 √3이다. 나눠서 효과 크기로.
-    return (onSum / onCount - offSum / offCount) / Math.sqrt(3);
-  };
+  const novelty = beatNovelty(beats, fps, onset, low, chroma);
 
   let best = { bar: 4, phase: 0, score: -Infinity, weighted: -Infinity };
   const perBar = new Map<number, number>();
@@ -268,11 +368,7 @@ export function estimateMeter(
   // 셋을 먼저 보면 완전히 평평한 신호(악센트 없는 메트로놈 트랙 등)에서
   // 3/4가 나온다. 4/4가 압도적으로 흔하다는 `TRIPLE_MARGIN`의 취지와 반대다.
   for (const bar of [4, 3, 2]) {
-    let barBest = { bar, phase: 0, score: -Infinity };
-    for (let phase = 0; phase < bar; phase += 1) {
-      const score = effect(bar, phase);
-      if (score > barBest.score) barBest = { bar, phase, score };
-    }
+    const barBest = { bar, ...barEffect(novelty, bar) };
     perBar.set(bar, barBest.score);
     // 4/4가 압도적으로 흔하므로 나머지는 마진을 넘어야 이긴다.
     // 고르는 데만 쓰고, 신뢰도는 아래에서 원래 점수로 잰다.
