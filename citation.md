@@ -463,12 +463,35 @@ FFT까지 직접 짰다. 따라서 여기에 걸리는 라이선스는 없지만
 | 가수의 타이밍 편차는 표현이자 습관 — 악보 시작 ≠ 발성 시작 | Hono et al., "Singing Voice Synthesis Based on Frame-Level Sequence-to-Sequence Models Considering Vocal Timing Deviation", [arXiv 2301.02262](https://arxiv.org/abs/2301.02262) | `transcribe/quantize.ts` `estimateOffsetMs` |
 | **클록 드리프트** — 밀린 양이 곡 안에서 변한다. 양자화와 템포/오프셋 곡선을 함께 푼다 | Cemgil & Kappen, "Monte Carlo Methods for Tempo Tracking and Rhythm Quantization", *JAIR* 18, 2003 — [doi:10.1613/jair.1121](https://doi.org/10.1613/jair.1121) · 위 Nakamura 2017도 드리프트 변수를 둔다 | `transcribe/quantize.ts` `estimateOffsetCurve` (2026-08-10 추가) |
 
+| **CFP(Combined Frequency and Periodicity)** — 스펙트럼 × 켑스트럼. 스펙트럼은 반토막에, 켑스트럼은 두 배에 속으므로 곱하면 서로의 옥타브 오류가 상쇄된다. 옥타브 심판으로 쓴다 | Su & Yang, "Combining Spectral and Temporal Representations for Multipitch Estimation of Polyphonic Music", *IEEE/ACM TASLP* 23(10), 2015 — [doi:10.1109/TASLP.2015.2442411](https://doi.org/10.1109/TASLP.2015.2442411) | `server/app/cfp.py` (2026-08-18 추가) |
 | **다각선 단순화(RDP)** — 극점을 남기며 점을 줄인다. 피치 컨트롤 점 개수를 한 자릿수 줄이는 데 쓴다 | Ramer, "An iterative procedure for the polygonal approximation of plane curves", *CGIP* 1(3), 1972 · Douglas & Peucker, *Cartographica* 10(2), 1973 | `transcribe/curve.ts` `simplify` (2026-08-12 추가) |
 
 **RDP는 세로거리로 잰다.** 원 알고리즘은 선분까지의 수직거리를 쓰지만 우리 축은
 가로가 초·세로가 반음이라 수직거리에 뜻이 없다. 지키려는 양이 "그 시각의 음높이가
 얼마나 틀리는가"이므로 **같은 시각의 세로 오차(센트)**로 바꿔 썼다. 코드는 옮기지
 않았고 반복 절차만 따랐다(재귀 대신 명시적 스택).
+
+### CFP — 참조 구현을 읽었다는 것을 밝혀 둔다
+
+**이 항목만은 "논문만 읽었다"가 아니다.** 위 표의 다른 줄과 성격이 다르므로 따로 적는다.
+
+- **알고리즘의 출처는 논문**(Su & Yang 2015)이고, 층 구조("스펙트럼 → 켑스트럼 →
+  스펙트럼의 켑스트럼, 층마다 거듭제곱과 양 끝 절단")도 논문이 서술한 것이다.
+- **파라미터 값과 절단의 정확한 의미는 참조 구현에서 확인했다** —
+  [omnizart](https://github.com/Music-and-Culture-Technology-Lab/omnizart)의
+  `omnizart/feature/cfp.py`(**MIT**, 2026-08-18 GitHub API로 라이선스 직접 확인).
+  거기서 가져온 것은 `GAMMA = (0.24, 0.6, 1.0)`과 "음수를 0으로, 양 끝 `cutoff`를
+  0으로, 그 다음 거듭제곱"이라는 비선형 변환의 순서다.
+- **코드는 옮기지 않았다.** omnizart는 전체 로그주파수 필터뱅크를 만들지만
+  우리는 **점 질의만 한다**(`salience(time, freqs)`) — 심판이 프레임마다 후보
+  둘만 보므로 분쟁 프레임에서만 돌릴 수 있고, 그것이 비용을 곡당 1초 안쪽으로
+  묶는다. 창 길이(372ms)는 우리 평가셋에서 AUC로 다시 정했다(omnizart 기본값은 180ms).
+- scipy를 끌어오지 않으려고 **블랙만-해리스 창은 직접 적었다**(4항 코사인).
+  새 의존성이 없다.
+
+> **MIT라 옮겨도 법적으로는 문제가 없었다.** 그래도 새로 구현한 것은 필요한
+> 것(점 질의)이 참조 구현이 하는 것(필터뱅크)보다 훨씬 작아서다 — 옮겼다면
+> 안 쓰는 코드를 함께 들이고 비용도 두 자릿수 늘었다.
 
 **드리프트는 2026-08-10에 실측으로 필요성이 확인되고 추가됐다** — 정답 MIDI가
 있는 실곡에서 밀린 양이 −56~+60ms를 오갔다(16분 한 칸이 108ms). Cemgil은

@@ -118,7 +118,7 @@ def curves_for(slot: str, variant: str) -> tuple[float, dict[str, np.ndarray]]:
     """슬롯의 오디오에서 커브를 뽑는다. 반환은 (홉초, {이름: MIDI 배열})."""
     import soundfile as sf
 
-    from app import melody
+    from app import cfp, melody
 
     audio = ROOT / "cache" / slot / "input.wav"
     samples, rate = sf.read(str(audio), dtype="float32", always_2d=True)
@@ -128,16 +128,23 @@ def curves_for(slot: str, variant: str) -> tuple[float, dict[str, np.ndarray]]:
     out = {"기준패스만": to_midi(np.asarray(base["f0"], dtype=np.float64))}
 
     if variant == "octave2":
-        # **`melody.resolve_octave_pass`를 그대로 부른다** — 여기서 규칙을 다시
-        # 구현하면 도구와 파이프라인이 갈려서, 재던 개선이 실제로 배포되는지
-        # 알 수 없게 된다. 하니스가 `ui/transcription.tsx`와 같은 결선을 쓰는
-        # 것과 같은 이유다.
+        # **`melody`의 함수를 그대로 부른다** — 여기서 규칙을 다시 구현하면
+        # 도구와 파이프라인이 갈려서, 재던 개선이 실제로 배포되는지 알 수 없게
+        # 된다. 하니스가 `ui/transcription.tsx`와 같은 결선을 쓰는 것과 같은 이유다.
+        #
+        # **장치가 둘이라 칸도 둘이다.** 보수적 되올림(`resolve_octave_pass`)과
+        # 음역 분할(`resolve_high_register`)은 서로 다른 것을 고치므로, 한 칸에
+        # 합치면 어느 쪽이 일했는지 읽을 수 없다.
         lowered = melody.extract_f0_from_samples(mono, rate // 2)
-        fixed, lifted = melody.resolve_octave_pass(base, lowered)
-        size = len(fixed["f0"])
+        fixed, lifted = melody.resolve_octave_pass(base, lowered, cfp.CfpProbe(mono, rate))
+        split, switched = melody.resolve_high_register(fixed, lowered)
+        size = len(split["f0"])
         out = {k: v[:size] for k, v in out.items()}
         out[f"+2패스({lifted / max(size, 1):.1%})"] = to_midi(
-            np.asarray(fixed["f0"], dtype=np.float64)
+            np.asarray(fixed["f0"][:size], dtype=np.float64)
+        )
+        out[f"+음역분할({switched / max(size, 1):.0%})"] = to_midi(
+            np.asarray(split["f0"], dtype=np.float64)
         )
 
     return base["hopMs"] / 1000.0, out

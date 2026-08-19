@@ -78,7 +78,7 @@ def main() -> None:
                 print(f"건너뜀 (vocal_processed.wav 없음): {path}", file=sys.stderr)
                 continue
             voicing = melody.extract_f0(voicing_path)
-            curve, lifted = melody.pipeline_curve(samples.mean(axis=1), rate, voicing)
+            curve, lifted, _switched = melody.pipeline_curve(samples.mean(axis=1), rate, voicing)
             elapsed = time.monotonic() - started
             target = args.out / f"{path.parent.name}-full.json"
             target.write_text(json.dumps(curve), encoding="utf-8")

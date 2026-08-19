@@ -13,14 +13,16 @@ from __future__ import annotations
 
 import io
 import json
+import sys
 import threading
+import types
 import wave
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from app import main, melody
+from app import cfp, main, melody
 from app.health import Check
 from app.audio import Audio, gate, highpass, normalize, process_vocal, resample
 from app.jobs import Cancelled, JobStore, digest_of
@@ -282,21 +284,155 @@ def test_octave_candidate_keeps_only_octave_relation():
     assert alt["f0"][3] == 0.0  # 기준 무성 — 관계를 잴 수 없다
 
 
-def test_pipeline_curve_carries_masked_alt(monkeypatch):
-    """f0Alt에도 같은 유·무성 마스크가 걸리고 길이가 기준과 같다."""
+def _fake_passes(monkeypatch, base_hz, lowered_hz):
+    """기준 패스와 옥타브 패스를 가짜로. **모델을 부르지 않는다.**
+
+    `lowered_hz`는 모델이 절반 속도로 들었을 때의 값이라, 되돌리면 그 두 배가 된다.
+    """
 
     def fake_extract(samples, rate, min_confidence=melody.MIN_CONFIDENCE):
-        if rate == 100:  # 기준 패스
-            return {"hopMs": 10.0, "f0": [440.0] * 6, "confidence": [0.9] * 6}
-        # 옥타브 패스(rate//2) — 되돌리면 880이 되는 값
-        return {"hopMs": 10.0, "f0": [440.0] * 12, "confidence": [0.9] * 12}
+        if rate == 100:
+            return {"hopMs": 10.0, "f0": [base_hz] * 6, "confidence": [0.9] * 6}
+        return {"hopMs": 10.0, "f0": [lowered_hz] * 12, "confidence": [0.9] * 12}
 
     monkeypatch.setattr(melody, "extract_f0_from_samples", fake_extract)
+
+
+def test_pipeline_curve_carries_masked_alt(monkeypatch):
+    """f0Alt에도 같은 유·무성 마스크가 걸리고 길이가 기준과 같다.
+
+    **분할 문턱 아래의 음을 쓴다** — 위쪽 음을 쓰면 `resolve_high_register`가
+    이미 그 값을 본 커브에 넣어 버려서 후보로 남을 것이 없다(그건 아래 시험이 본다).
+    """
+    _fake_passes(monkeypatch, 110.0, 110.0)  # 기준 A2(45) · 되돌리면 A3(57)
     voicing = {"hopMs": 10.0, "f0": [220.0, 220.0, 0.0, 220.0, 220.0, 220.0], "confidence": [0.5] * 6}
-    curve, _lifted = melody.pipeline_curve(np.zeros(600, dtype=np.float32), 100, voicing)
+    curve, _lifted, _switched = melody.pipeline_curve(np.zeros(600, dtype=np.float32), 100, voicing)
     assert len(curve["f0Alt"]) == len(curve["f0"])
     assert curve["f0"][2] == 0.0 and curve["f0Alt"][2] == 0.0  # 마스크가 둘 다 지운다
-    assert curve["f0Alt"][0] == pytest.approx(880.0)  # 후보가 실린다
+    assert curve["f0"][0] == pytest.approx(110.0)  # 분할 문턱 아래라 기준 그대로
+    assert curve["f0Alt"][0] == pytest.approx(220.0)  # 후보가 실린다
+
+
+# --- 음역 분할 -------------------------------------------------------------
+#
+# 고음에서는 confidence가 4~6배 무너져 문턱 규칙이 원리적으로 작동하지 않는다.
+# 그래서 **어느 음역인가**로 가르고, 판단 기준은 2패스 추정치다(기준 패스는
+# 반토막이 나 있을 수 있어 그걸로 음역을 재면 순환이다).
+
+
+def test_high_register_switches_to_second_pass(monkeypatch):
+    """2패스가 분할 문턱 이상을 주장하면 그 프레임은 통째로 2패스를 쓴다."""
+    _fake_passes(monkeypatch, 440.0, 440.0)  # 기준 A4(69) · 되돌리면 A5(81)
+    voicing = {"hopMs": 10.0, "f0": [220.0] * 6, "confidence": [0.5] * 6}
+    curve, _lifted, switched = melody.pipeline_curve(np.zeros(600, dtype=np.float32), 100, voicing)
+    assert curve["f0"][0] == pytest.approx(880.0)
+    assert switched == 6
+
+
+def test_high_register_leaves_low_notes_alone(monkeypatch):
+    """문턱 아래를 주장하면 아무 일도 안 한다."""
+    base = {"hopMs": 10.0, "f0": [110.0] * 6, "confidence": [0.9] * 6}
+    lowered = {"hopMs": 10.0, "f0": [110.0] * 12, "confidence": [0.9] * 12}  # 되돌리면 A3(57)
+    curve, switched = melody.resolve_high_register(base, lowered)
+    assert curve["f0"] == base["f0"]
+    assert switched == 0
+
+
+def test_high_register_does_not_revive_unvoiced(monkeypatch):
+    """**유성 판정은 넓히지 않는다.** 기준이 무성인 자리는 그대로 둔다."""
+    base = {"hopMs": 10.0, "f0": [440.0, 0.0, 440.0, 0.0], "confidence": [0.9, 0.0, 0.9, 0.0]}
+    lowered = {"hopMs": 10.0, "f0": [440.0] * 8, "confidence": [0.9] * 8}
+    curve, switched = melody.resolve_high_register(base, lowered)
+    assert curve["f0"][1] == 0.0 and curve["f0"][3] == 0.0
+    assert curve["f0"][0] == pytest.approx(880.0)
+    assert switched == 2
+
+
+def test_high_register_ignores_octave_relation(monkeypatch):
+    """**옥타브 관계를 요구하지 않는다.** 요구하면 이득의 대부분이 사라진다.
+
+    실측: 옥타브 제약을 걸면 곡B 커버1의 F5+ 회수가 +26음에서 +1음이 되고
+    쌍둥이 두 커버가 반대로 움직인다.
+    """
+    # 기준 440(A4=69), 2패스는 되돌리면 700Hz(≈F5=77) — 옥타브 관계가 아니다
+    base = {"hopMs": 10.0, "f0": [440.0] * 4, "confidence": [0.9] * 4}
+    lowered = {"hopMs": 10.0, "f0": [350.0] * 8, "confidence": [0.9] * 8}
+    curve, switched = melody.resolve_high_register(base, lowered)
+    assert curve["f0"][0] == pytest.approx(700.0)
+    assert switched == 4
+
+
+def test_pipeline_curve_counts_two_devices_separately(monkeypatch):
+    """되올린 수와 분할한 수를 **합치지 않는다** — 따로 읽을 수 있어야 한다."""
+    _fake_passes(monkeypatch, 440.0, 440.0)
+    voicing = {"hopMs": 10.0, "f0": [220.0] * 6, "confidence": [0.5] * 6}
+    curve, lifted, switched = melody.pipeline_curve(np.zeros(600, dtype=np.float32), 100, voicing)
+    assert isinstance(lifted, int) and isinstance(switched, int)
+    assert switched == 6
+    assert len(curve["f0"]) == 6
+
+
+# --- CFP 살리언스 ---------------------------------------------------------
+#
+# **답을 아는 합성 신호로만 본다.** 실곡 정확도는 `scripts/f0_truth.py`가 낸다.
+# 여기서 못 박는 것은 "스펙트럼 × 켑스트럼이 옥타브를 실제로 가르는가"이다.
+
+
+def _harmonic(f0, rate=44100, count=8, seconds=1.0):
+    t = np.arange(int(rate * seconds)) / rate
+    return sum(np.sin(2 * np.pi * f0 * k * t) / k for k in range(1, count + 1))
+
+
+def test_cfp_prefers_the_true_f0_over_its_octaves():
+    """참 f0에서만 스펙트럼과 켑스트럼이 함께 크다."""
+    probe = cfp.CfpProbe(_harmonic(220.0), 44100)
+    low, true, high = probe.salience(0.5, np.array([110.0, 220.0, 440.0]))
+    assert true > low and true > high
+
+
+def test_cfp_survives_few_harmonics():
+    """**이것이 이 파일의 존재 이유다.** 고음은 8kHz 안에 배음이 8개뿐이다."""
+    probe = cfp.CfpProbe(_harmonic(932.3, count=8), 44100)
+    half, true = probe.salience(0.5, np.array([466.16, 932.3]))
+    assert true > half
+
+
+def test_cfp_survives_accompaniment_at_the_subharmonic():
+    """반주가 아래 옥타브 자리를 채워도 버틴다.
+
+    스펙트럼만 보는 심판이 죽은 자리다(H11) — 거기서는 반주가 채운 f0/2가
+    참 f0와 구별되지 않았다. 켑스트럼 항이 그것을 가른다.
+    """
+    rate = 44100
+    t = np.arange(rate) / rate
+    mixed = _harmonic(932.3, count=8) + 0.7 * np.sin(2 * np.pi * 466.16 * t)
+    half, true = cfp.CfpProbe(mixed, rate).salience(0.5, np.array([466.16, 932.3]))
+    assert true > half
+
+
+def test_cfp_ignores_frequencies_outside_the_range():
+    probe = cfp.CfpProbe(_harmonic(220.0), 44100)
+    assert probe.salience(0.5, np.array([10.0, 20000.0])).tolist() == [0.0, 0.0]
+
+
+def test_cfp_handles_edges_without_crashing():
+    """창이 오디오 밖으로 나가는 시각. 곡의 처음·끝에서 실제로 일어난다."""
+    probe = cfp.CfpProbe(_harmonic(220.0, seconds=0.5), 44100)
+    for at in (0.0, 0.49, 5.0):
+        assert probe.salience(at, np.array([220.0])).shape == (1,)
+
+
+def test_octave_pass_without_probe_is_unchanged():
+    """probe를 안 주면 예전 규칙 그대로다 — 회귀가 나면 여기서 잡힌다."""
+    size = 40
+    base = {"hopMs": 10.0, "f0": [440.0] * size, "confidence": _spread(size, 0.2, 0.05)}
+    lowered = {
+        "hopMs": 10.0,
+        "f0": [440.0] * (size * 2),
+        "confidence": _spread(size * 2, 0.7, 0.95),
+    }
+    with_probe = melody.resolve_octave_pass(base, lowered, None)
+    assert with_probe == melody.resolve_octave_pass(base, lowered)
 
 
 def test_silent_curve_matches_duration():
@@ -670,6 +806,43 @@ def test_missing_structure_is_404_not_an_error(client):
     assert "hasStructure" in meta
     if not meta["hasStructure"]:
         assert client.get(f"/jobs/{job_id}/structure").status_code == 404
+
+
+def test_structure_passes_the_model_name_to_allin1(monkeypatch):
+    """**`MODEL` 상수가 실제로 allin1에 넘어가는가.**
+
+    2026-08-18까지 안 넘어가고 있었다. `analyze()`가 `model=`을 빼먹어서
+    allin1의 기본값이 쓰였는데, 마침 그 값이 `MODEL`과 같아서 **동작은 맞고
+    상수만 죽어 있었다** — 폴드를 하나로 줄여 속도를 재려다 발견했다.
+
+    조용히 틀리는 부류라 여기서 못박는다. 진짜 추론은 돌리지 않는다(가중치가
+    수백 MB이고 곡당 수 분이다) — 넘어가는 인자만 본다.
+    """
+    from app import structure
+
+    seen = {}
+
+    class FakeResult:
+        bpm = 120
+        beats = [0.5, 1.0]
+        downbeats = [0.5]
+        beat_positions = [1, 2]
+        segments = []
+
+    def fake_analyze(**kwargs):
+        seen.update(kwargs)
+        return FakeResult()
+
+    fake_allin1 = types.SimpleNamespace(analyze=fake_analyze)
+    monkeypatch.setattr(structure, "_prepare_natten", lambda: None)
+    monkeypatch.setitem(sys.modules, "allin1", fake_allin1)
+
+    structure.analyze(Path("a.wav"), Path("/tmp"))
+    assert seen["model"] == structure.MODEL, "MODEL 상수가 allin1에 안 넘어간다"
+
+    # 폴드를 골라 부를 수 있어야 한다 (속도 실험이 이걸 쓴다)
+    structure.analyze(Path("a.wav"), Path("/tmp"), model="harmonix-fold0")
+    assert seen["model"] == "harmonix-fold0"
 
 
 def test_structure_failure_does_not_throw_away_the_melody(client, monkeypatch, tmp_path: Path):

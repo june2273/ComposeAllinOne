@@ -49,6 +49,11 @@ from typing import Callable
 ENGINE = "allin1-harmonix-all"
 
 #: All-In-One의 사전학습 가중치 이름. 8개 모델의 배깅이 기본값(`harmonix-all`)이다.
+#:
+#: **반드시 `analyze()`에 넘겨야 한다.** 안 넘기면 allin1의 기본값이 쓰이는데
+#: 지금은 그 값이 우연히 같아서 동작이 맞다 — 그래서 이 상수를 고쳐도 아무 일이
+#: 일어나지 않던 시기가 있었다(2026-08-18에 잡았다). 폴드를 하나로 줄여 속도를
+#: 재려다 발견한 것이고, 조용히 틀리는 종류라 회귀 시험을 붙여 뒀다.
 MODEL = "harmonix-all"
 
 #: **CPU로 고정한다.** natten의 커널이 MPS를 지원하지 않고, 이 저장소는 이미
@@ -136,6 +141,7 @@ def analyze(
     source: Path,
     work_dir: Path,
     progress: Progress | None = None,
+    model: str = MODEL,
 ) -> dict:
     """오디오 하나에서 구간·비트·다운비트를 뽑는다.
 
@@ -156,6 +162,9 @@ def analyze(
         progress("구조 분석", 0.0)
     result = allin1.analyze(
         paths=source,
+        # **명시적으로 넘긴다.** 안 넘기면 allin1의 기본값이 쓰여서 `MODEL`을
+        # 고쳐도 아무 일이 안 일어난다(위 상수 주석).
+        model=model,
         # **결과 JSON은 우리가 쓴다.** allin1의 out_dir 캐시를 쓰면 캐시가 두 벌이
         # 되고, 우리 `meta.json`의 엔진 판정과 어긋날 수 있다.
         out_dir=None,

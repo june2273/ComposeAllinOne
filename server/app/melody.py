@@ -31,13 +31,14 @@ from pathlib import Path
 
 import numpy as np
 
+from . import cfp
 from .audio import Audio
 
 #: 이 커브를 만든 방식. **`meta.json`에 적혀 캐시 무효화에 쓰인다** —
 #: 갈아끼웠는데 캐시가 옛 커브를 돌려주면 바꾼 티가 안 난다.
 #: **모델 이름만이 아니라 "무엇을 먹였는가"까지 담는다**(`merge_voicing` 참조) —
 #: 입력을 바꾼 것도 사용자가 보는 결과를 바꾸므로 같은 무효화가 필요하다.
-ENGINE = "rmvpe+mask+oct2dual"
+ENGINE = "rmvpe+mask+oct2cfp+hi69"
 
 #: 커브의 프레임 간격(밀리초). 웹의 `PitchCurve.hopMs`와 같은 값이다.
 HOP_MS = 10.0
@@ -70,6 +71,18 @@ MIN_CONFIDENCE = 0.03
 OCTAVE_BASE_QUANTILE = 0.6
 OCTAVE_LIFT_QUANTILE = 0.6
 
+#: CFP 살리언스 비율 `Z(2X)/Z(X)`가 이보다 크면 **신뢰도 조건을 면제하고** 올린다.
+#:
+#: 위 두 분위수는 "어느 곡도 퇴행하지 않는다"를 지키느라 발동을 0~3%로 눌러 놓은
+#: 값이라 고음을 절반밖에 못 건진다. CFP는 **다른 종류의 증거**(스펙트럼 × 켑스트럼,
+#: `app/cfp.py`)라 그 조건을 우회해도 안전하다.
+#:
+#: **실측으로 정했다** — 정답 6곡에서 이 규칙(`현재 OR CFP>1.5`)이 F5 이상 정확률을
+#: 2패스 없음 대비 평균 **+8.2%p** 올린다(신뢰도 조건만 쓰면 +4.9%p).
+#: 문턱은 완만하다: 1.0에서 +9.4, 1.5에서 +8.2, 3.0에서 +6.2로 단조롭고 꺾이지 않는다.
+#: 1.5를 고른 것은 더 낮추면 퇴행하는 곡이 하나에서 둘로 늘기 때문이다.
+CFP_LIFT_RATIO = 1.5
+
 #: 다수결 창(프레임). 옥타브는 프레임 하나로 뒤집히지 않는다 —
 #: `notes.pickOnsets`의 불응기와 같은 종류의 장치다. 10ms 홉이므로 50ms.
 OCTAVE_MAJORITY = 5
@@ -77,6 +90,26 @@ OCTAVE_MAJORITY = 5
 #: 다룰 음역. 웹 쪽 MIN_MIDI/MAX_MIDI와 맞춰 둔다.
 MIN_MIDI = 36
 MAX_MIDI = 96
+
+#: 이 음 이상을 2패스가 주장하면 **그 프레임은 통째로 2패스를 쓴다**(A4).
+#:
+#: `resolve_octave_pass`의 보수적 병합과 **다른 종류의 판단**이다. 저쪽은
+#: "이 프레임의 옥타브가 틀렸는가"를 confidence로 묻는데, **고음에서는 그
+#: confidence 자체가 못 믿을 값이다** — 정답 구간의 중앙값이 C5 미만 0.28·0.79에서
+#: C5 위 0.07~0.17로 **4~6배 무너진다**(실측 2026-08-18). 배음이 8kHz 안에 8개뿐이라
+#: 어느 빈도 도드라지지 않기 때문이고(§2.8), 그래서 문턱으로 거르는 규칙이 원리적으로
+#: 작동하지 않는다. 대신 **어느 음역인가**로 가른다.
+#:
+#: **판단 기준을 2패스 추정치로 삼는 것이 요점이다.** 기준 패스는 고음에서 반토막이
+#: 나 있을 수 있어 그걸로 음역을 재면 순환이다 — 고음을 고음이라 부르지 못한다.
+#:
+#: **옥타브 관계를 요구하지 않는다.** 요구하면 이득의 대부분이 사라지고(실측:
+#: F5+ 회수 +26음 → +1음) 쌍둥이 두 커버가 반대로 움직인다.
+#:
+#: 64~71이 6곡에서 거의 같았고 69를 골랐다. **평가셋이 6곡뿐이라는 것을 기억할 것** —
+#: 이 저장소에서 곡을 늘렸을 때 결론이 뒤집힌 적이 두 번 있다.
+OCTAVE_SPLIT_MIDI = 69
+
 
 #: 실행 장치를 **CPU로 고정한다.**
 #:
@@ -233,7 +266,9 @@ def restore_octave_curve(lowered: dict) -> dict:
     }
 
 
-def resolve_octave_pass(base: dict, lowered: dict) -> tuple[dict, int]:
+def resolve_octave_pass(
+    base: dict, lowered: dict, probe: "cfp.CfpProbe | None" = None
+) -> tuple[dict, int]:
     """반옥타브 내려 다시 물어본 커브로 **아래로 깔린 옥타브만** 되올린다.
 
     **고음에서 f0가 반토막 나는 것은 모델 탓이 아니라 입력 표현의 성질이다**
@@ -288,11 +323,24 @@ def resolve_octave_pass(base: dict, lowered: dict) -> tuple[dict, int]:
     with np.errstate(divide="ignore", invalid="ignore"):
         gap = 12.0 * np.log2(np.where(lift_f0 > 0, lift_f0, np.nan) / np.where(base_f0 > 0, base_f0, np.nan))
 
+    candidate = np.abs(gap - 12.0) < 0.5
     pick = (
-        (np.abs(gap - 12.0) < 0.5)
+        candidate
         & (_quantile_rank(base_conf, base_f0 > 0) < OCTAVE_BASE_QUANTILE)
         & (_quantile_rank(lift_conf, lift_f0 > 0) > OCTAVE_LIFT_QUANTILE)
     )
+    if probe is not None:
+        # **다른 종류의 증거로 신뢰도 조건을 우회한다**(`app/cfp.py`). 켑스트럼이
+        # 위 옥타브를, 스펙트럼이 아래 옥타브를 눌러 참 f0에서만 곱이 크다.
+        # **후보 프레임에서만 계산한다** — 전체의 0.6~13%라 비용이 곡당 1초 안쪽이다.
+        hop_sec = base["hopMs"] / 1000.0
+        strong = np.zeros(size, dtype=bool)
+        for index in np.flatnonzero(np.nan_to_num(candidate)):
+            hz = base_f0[index]
+            z_low, z_high = probe.salience(index * hop_sec, np.array([hz, hz * 2.0]))
+            strong[index] = z_high > z_low * CFP_LIFT_RATIO
+        pick = pick | strong
+
     pick = np.nan_to_num(pick.astype(np.float64))
     if OCTAVE_MAJORITY > 1 and size > OCTAVE_MAJORITY:
         # `mode="same"`은 **긴 쪽** 길이를 돌려준다 — 커브가 창보다 짧으면
@@ -305,6 +353,41 @@ def resolve_octave_pass(base: dict, lowered: dict) -> tuple[dict, int]:
         "hopMs": base["hopMs"],
         "f0": [round(float(v), 3) for v in np.where(pick, lift_f0, base_f0)],
         "confidence": [round(float(v), 3) for v in np.where(pick, lift_conf, base_conf)],
+    }, int(pick.sum())
+
+
+def resolve_high_register(pitch: dict, lowered: dict) -> tuple[dict, int]:
+    """고음 프레임을 **통째로** 2패스 커브로 바꾼다. 반환: (커브, 바꾼 프레임 수).
+
+    `resolve_octave_pass`가 끝난 뒤에 건다. 저쪽이 "프레임마다 옥타브가 틀렸는지"를
+    신뢰도로 묻는 보수적 판단이라면, 이쪽은 **"이 음역에서는 2패스가 더 낫다"**는
+    구간 판단이다. 둘을 겹쳐 쓰는 이유는 고음에서 신뢰도가 무너져(위 상수의 주석)
+    저쪽 규칙이 원리적으로 발동하지 못하기 때문이다.
+
+    **왜 이것이 음표를 살리는가.** 프레임 정확률로는 F5+ 평균 +13%p인데 **음표
+    회수율은 +52%p**다(커버1 32% → 84%). 증폭이 나는 자리가 `notes.ts`의 문턱이다 —
+    DP는 일치 구간이 `SWITCH_MS`(7프레임)를 넘어야 음을 세우는데, 2패스가 그 구간을
+    **이어 붙여** 주면 음표가 통째로 살아난다(8프레임 이상인 F5+ 음표 비율이
+    커버1 62% → 78%, 커버2 48% → 76%).
+
+    **유성 판정은 넓히지 않는다.** 기준 커브가 유성인 프레임만 바꾼다 —
+    `merge_voicing`과 `MIN_CONFIDENCE`가 만든 판단을 우회하면 유령이 그만큼 돌아온다.
+    """
+    restored = restore_octave_curve(lowered)
+    size = min(len(pitch["f0"]), len(restored["f0"]))
+    f0 = np.asarray(pitch["f0"][:size], dtype=np.float64)
+    conf = np.asarray(pitch["confidence"][:size], dtype=np.float64)
+    lift_f0 = np.asarray(restored["f0"][:size], dtype=np.float64)
+    lift_conf = np.asarray(restored["confidence"][:size], dtype=np.float64)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        lift_midi = 69.0 + 12.0 * np.log2(np.where(lift_f0 > 0, lift_f0, np.nan) / 440.0)
+    pick = np.nan_to_num(lift_midi >= OCTAVE_SPLIT_MIDI) & (lift_f0 > 0) & (f0 > 0)
+
+    return {
+        "hopMs": pitch["hopMs"],
+        "f0": [round(float(v), 3) for v in np.where(pick, lift_f0, f0)],
+        "confidence": [round(float(v), 3) for v in np.where(pick, lift_conf, conf)],
     }, int(pick.sum())
 
 
@@ -346,20 +429,27 @@ def octave_candidate(base: dict, lowered: dict) -> dict:
     }
 
 
-def pipeline_curve(mix: np.ndarray, rate: int, voicing: dict) -> tuple[dict, int]:
+def pipeline_curve(mix: np.ndarray, rate: int, voicing: dict) -> tuple[dict, int, int]:
     """믹스 + 유·무성 커브 → 앱이 쓰는 최종 f0 커브(옥타브 후보 포함).
 
     **main.py와 평가 하니스가 이 함수 하나를 함께 쓴다.** 결선을 두 벌 적으면
     조용히 갈라져서 재던 것과 배포되는 것이 달라진다 — `scripts/f0_truth.py`가
     `resolve_octave_pass`를 직접 부르는 것과 같은 규칙이다.
 
-    반환: (커브, 되올린 프레임 수). 커브에는 `f0Alt`/`confidenceAlt`가 실린다 —
+    반환: (커브, 보수적으로 되올린 프레임 수, 음역 분할로 바꾼 프레임 수).
+    **두 수를 합치지 않는다** — 장치가 둘이고, 나중에 어느 쪽이 얼마나 일했는지
+    떼어 읽을 수 없으면 `meta.json`에 남기는 뜻이 없다.
+
+    커브에는 `f0Alt`/`confidenceAlt`가 실린다 —
     옥타브 후보에도 **같은 마스크**를 걸어, 후보가 유령을 만들 수 있는 자리가
     기준 커브와 같아지게 한다.
     """
     base = extract_f0_from_samples(mix, rate)
     lowered = extract_f0_from_samples(mix, rate // 2)
-    pitch, lifted = resolve_octave_pass(base, lowered)
+    pitch, lifted = resolve_octave_pass(base, lowered, cfp.CfpProbe(mix, rate))
+    pitch, switched = resolve_high_register(pitch, lowered)
+    # **후보는 분할이 끝난 커브를 기준으로 뽑는다.** 분할 전 커브에 대고 재면
+    # 이미 2패스로 바뀐 프레임에 "옥타브 후보"로 같은 값이 또 실린다.
     candidate = octave_candidate(pitch, lowered)
 
     curve = merge_voicing(pitch, voicing)
@@ -368,7 +458,7 @@ def pipeline_curve(mix: np.ndarray, rate: int, voicing: dict) -> tuple[dict, int
     pad = size - len(alt["f0"])
     curve["f0Alt"] = alt["f0"][:size] + [0.0] * max(pad, 0)
     curve["confidenceAlt"] = alt["confidence"][:size] + [0.0] * max(pad, 0)
-    return curve, lifted
+    return curve, lifted, switched
 
 
 def merge_voicing(pitch: dict, voicing: dict) -> dict:

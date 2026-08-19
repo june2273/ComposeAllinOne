@@ -216,6 +216,7 @@ def _pipeline(job: Job, source: Path, out_dir: Path) -> Path:
     # 옥타브 2패스가 되올린 프레임 수. 커브를 새로 뽑을 때만 값이 선다 —
     # 재사용 경로에서는 이번에 아무것도 안 했으므로 None이 정직하다.
     octave_lifted: int | None = None
+    high_switched: int | None = None
     if _f0_reusable(out_dir, previous, has_melody):
         report("멜로디 재사용", 0.78)
         has_melody = True
@@ -241,7 +242,7 @@ def _pipeline(job: Job, source: Path, out_dir: Path) -> Path:
                 # 내려서 물으면 17개가 된다. 확실한 자리는 여기서 되올리고, 나머지는
                 # `f0Alt` 후보로 실어 웹의 노트 DP가 연속성으로 고르게 한다.
                 report("멜로디 추출(원본 믹스·옥타브)", 0.72)
-                curve, octave_lifted = melody.pipeline_curve(
+                curve, octave_lifted, high_switched = melody.pipeline_curve(
                     audio.samples, audio.rate, curve
                 )
         (out_dir / "f0.json").write_text(json.dumps(curve), encoding="utf-8")
@@ -286,6 +287,7 @@ def _pipeline(job: Job, source: Path, out_dir: Path) -> Path:
                 # 옥타브 2패스가 되올린 프레임 수. **이 장치의 효과를 나중에
                 # 분리해서 읽으려면 얼마나 발동했는지를 알아야 한다**(실측 0~3%).
                 "octaveLiftedFrames": octave_lifted,
+                "highRegisterFrames": high_switched,
                 # **실패해도 엔진 이름을 적는다.** 안 적으면 `_cache_hit`이
                 # "구조를 아직 안 돌렸다"로 읽고 곡을 열 때마다 파이프라인을
                 # 통째로 다시 돌린다 — 고쳐지지도 않을 실패를 위해서.

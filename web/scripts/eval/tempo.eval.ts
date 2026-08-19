@@ -22,7 +22,7 @@
  * ```
  */
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { test } from "vitest";
@@ -30,93 +30,11 @@ import { test } from "vitest";
 import { ANALYSIS_RATE, analyzeAudio, barEffect, beatNovelty } from "../../src/core/analysis";
 import { extractFeatures, normalizeOnset } from "../../src/core/analysis/features";
 import { estimateMeter } from "../../src/core/analysis/meter";
-import { halfBeatStrength, relatedTempo, trackBeats } from "../../src/core/analysis/tempo";
+import { halfBeatStrength, trackBeats } from "../../src/core/analysis/tempo";
+import { evalSongs, ratioName } from "./truth";
 import { loadMono } from "./wav";
 
-const CACHE = process.env.EVAL_CACHE ?? "../server/cache";
-const EVALSET = process.env.EVAL_SET ?? "../evalset";
 const OUT = process.env.EVAL_OUT ?? "/tmp/tempo";
-
-/** 정답과 이만큼 안에 들면 맞은 것으로 본다. MIREX 관례가 4%다 */
-const TOLERANCE = 0.04;
-
-interface Song {
-  slot: string;
-  name?: string;
-  source?: string | null;
-  durationSec?: number;
-  truthBpm?: number;
-  truthBeatsPerBar?: number;
-  /** 있으면 평가에서 뺀다. 값은 왜 뺐는지 — `evalset/README.md`의 '제외한 곡' */
-  exclude?: string;
-}
-
-/**
- * 잴 곡들. **`evalset/songs.json`이 유일한 출처다** — `truthBpm`은
- * `evalset.py truth`가 truth MIDI를 구우면서 함께 적는다.
- *
- * 정답이 없는 곡도 함께 돈다. 정답률은 못 내지만 **후보 무게의 분포**는
- * 볼 수 있고, 그게 문턱을 정할 때 필요한 것이다 — 정답 4곡으로 문턱을
- * 맞추는 것이 이 저장소가 두 번 데인 실패 모양이다.
- *
- * **`exclude`가 붙은 곡은 아예 안 돈다.** 곡 전체를 한 덩어리로 보는 지금
- * 파이프라인으로는 정답을 하나로 적을 수 없는 곡(변박·변속·전조)과, 애초에
- * 음원이 아닌 것(앞에 게임 튜토리얼이 붙은 녹음)이 거기 든다. 표에 섞이면
- * **평균이 조용히 오염되고** 왜 나쁜지 아무도 모르게 된다.
- */
-function songs(): {
-  slot: string; name: string; audio: string;
-  truthBpm: number | null; truthBar: number | null;
-}[] {
-  const raw = JSON.parse(readFileSync(join(EVALSET, "songs.json"), "utf-8")) as {
-    songs?: Song[];
-  };
-  return (raw.songs ?? [])
-    .filter((s) => !s.exclude)
-    .map((s) => {
-      // **캐시가 없어도 잰다.** 템포는 원본 오디오만 있으면 나오는데,
-      // 캐시 슬롯을 만들려면 스템 분리에 수 분이 든다 — 정답 BPM만 있는 곡을
-      // 평가셋에 넣는 데 그 값을 치를 이유가 없다.
-      const cached = join(CACHE, s.slot, "input.wav");
-      const audio = existsSync(cached) ? cached : (s.source ?? "");
-      return {
-        slot: s.slot,
-        name: s.name ?? s.slot,
-        audio,
-        truthBpm: typeof s.truthBpm === "number" ? s.truthBpm : null,
-        truthBar: typeof s.truthBeatsPerBar === "number" ? s.truthBeatsPerBar : null,
-      };
-    })
-    // 4초짜리 합성 결선 신호는 곡이 아니다. 원본이 사라진 슬롯도 건너뛴다
-    .filter((s) => s.audio !== "" && existsSync(s.audio));
-}
-
-/**
- * 우리 BPM이 정답의 몇 배인가 — 사람이 읽는 이름으로.
- *
- * **비율 이름을 새로 정하지 않는다.** `relatedTempo`가 이미 "같은 그리드의
- * 다른 읽기"의 정의를 들고 있고(그 목록이 신뢰도 계산에도 쓰인다), 여기서
- * 따로 표를 만들면 두 정의가 조용히 갈린다.
- */
-function ratioName(ours: number, truth: number): string {
-  if (truth <= 0 || ours <= 0) return "?";
-  const ratio = ours / truth;
-  const named: [number, string][] = [
-    [1, "정확"],
-    [2, "×2"],
-    [0.5, "÷2"],
-    [3, "×3"],
-    [1 / 3, "÷3"],
-    [1.5, "×3/2"],
-    [2 / 3, "×2/3"],
-    [4, "×4"],
-    [0.25, "÷4"],
-  ];
-  for (const [value, name] of named) {
-    if (Math.abs(ratio / value - 1) < TOLERANCE) return name;
-  }
-  return relatedTempo(ours, truth, TOLERANCE) ? "배수(기타)" : "틀림";
-}
 
 test("정답 있는 곡의 템포와 배수 오류", { timeout: 30 * 60_000 }, () => {
   const rows: Record<string, unknown>[] = [];
@@ -126,7 +44,7 @@ test("정답 있는 곡의 템포와 배수 오류", { timeout: 30 * 60_000 }, (
       "eff4".padStart(7), "eff8".padStart(7)].join(""),
   ];
 
-  for (const { slot, name, audio, truthBpm, truthBar } of songs()) {
+  for (const { slot, name, audio, truthBpm, truthBar } of evalSongs()) {
     // 4초 결선 신호는 분석이 성립하지 않는다
     const samples = loadMono(audio);
     if (samples.length < ANALYSIS_RATE * 30) continue;
