@@ -2,7 +2,11 @@
 import { describe, expect, test, vi } from "vitest";
 
 import { NullSynth, midiToFreq } from "../src/core/audio";
-import { SineSynth } from "../src/platform/synth";
+import {
+  HARMONICS,
+  SEQUENCE_LOOKAHEAD,
+  SineSynth,
+} from "../src/platform/synth";
 
 describe("주파수", () => {
   test("A4 = 440Hz, C4 ≈ 261.63Hz", () => {
@@ -18,6 +22,8 @@ describe("SineSynth", () => {
   /** 최소한의 AudioContext 대역. 어떤 노드를 언제 걸었는지만 본다. */
   function fakeContext() {
     const started: Array<{ freq: number; start: number; stop: number }> = [];
+    /** 끝 시각이 예약된 것들. noteOn은 release 전까지 하나도 없어야 한다 */
+    const stops: number[] = [];
     const gains: Array<{ value: number; time: number }> = [];
     /** 게인 노드별 자동화 이벤트. 배음마다 포락선이 다른지 보려면 필요하다 */
     const envelopes: Array<Array<{ value: number; time: number }>> = [];
@@ -34,6 +40,8 @@ describe("SineSynth", () => {
       return {
         value: 0,
         setValueAtTime: record,
+        // `rampDown`이 예약된 자동화를 먼저 지운다. 없으면 release가 던진다.
+        cancelScheduledValues: () => {},
         linearRampToValueAtTime: record,
       };
     }
@@ -53,22 +61,25 @@ describe("SineSynth", () => {
           start(t: number) {
             started.push({ freq: osc.frequency.value, start: t, stop: 0 });
           },
-          stop() {},
+          stop(t?: number) {
+            if (t !== undefined) stops.push(t);
+          },
           onended: null as null | (() => void),
         };
         return osc;
       },
     };
-    return { ctx, started, gains, envelopes };
+    return { ctx, started, gains, envelopes, stops };
   }
 
   function withContext<T>(fn: () => T) {
-    const { ctx, started, gains, envelopes } = fakeContext();
+    const { ctx, started, gains, envelopes, stops } = fakeContext();
     vi.stubGlobal("AudioContext", function () {
       return ctx;
     });
     try {
-      return { result: fn(), started, gains, envelopes };
+      // ctx를 함께 돌려준다 — 시퀀스 테스트가 `currentTime`을 밀어야 한다
+      return { result: fn(), ctx, started, gains, envelopes, stops };
     } finally {
       vi.unstubAllGlobals();
     }
@@ -182,6 +193,183 @@ describe("SineSynth", () => {
       }
     });
   });
+
+  /**
+   * 자유 연주 경로. `playNotes`가 맨 앞에서 `stop()`을 부르는 것과 달리
+   * **여기서는 앞의 음이 살아 있어야 한다.**
+   */
+  describe("noteOn — 누르고 있는 동안", () => {
+    test("앞의 음을 끊지 않고 쌓인다", () => {
+      const { started, stops } = withContext(() => {
+        const s = new SineSynth();
+        s.noteOn(60);
+        s.noteOn(64);
+      });
+      expect(started).toHaveLength(HARMONICS.length * 2);
+      // 뗄 때까지 끝이 예약되지 않는다 — 그래서 무한히 울릴 수 있다
+      expect(stops).toHaveLength(0);
+    });
+
+    test("release가 배음 전부를 0까지 내리고 끝을 예약한다", () => {
+      const { envelopes, stops } = withContext(() => {
+        const s = new SineSynth();
+        s.noteOn(60).release();
+      });
+      expect(stops).toHaveLength(HARMONICS.length);
+      for (const events of envelopes) {
+        expect(events.at(-1)!.value).toBe(0);
+      }
+    });
+
+    test("두 번 떼도 한 번만 처리한다", () => {
+      const { stops } = withContext(() => {
+        const s = new SineSynth();
+        const note = s.noteOn(60);
+        note.release();
+        note.release();
+      });
+      expect(stops).toHaveLength(HARMONICS.length);
+    });
+
+    test("나이퀴스트를 넘는 배음은 여기서도 만들지 않는다", () => {
+      const { started } = withContext(() => {
+        const s = new SineSynth();
+        s.noteOn(120); // 8372Hz — 3배음이 나이퀴스트(24k)를 넘는다
+      });
+      expect(started.every((o) => o.freq < 24_000)).toBe(true);
+      expect(started.length).toBeLessThan(HARMONICS.length);
+    });
+  });
+
+  /**
+   * 악보 재생. `playNotes`와 갈리는 것은 **음표마다 시각과 길이가 다르다**는
+   * 것뿐이므로, 여기서는 그 시각이 맞게 잡히는지만 본다(음색은 위 테스트들이 본다).
+   */
+  describe("playSequence", () => {
+    /** 배음 넷 중 기본음만 골라 음표 단위로 본다 */
+    const fundamentals = (
+      started: Array<{ freq: number; start: number }>,
+      notes: readonly number[],
+    ) =>
+      started.filter((o) =>
+        notes.some((n) => Math.abs(o.freq - midiToFreq(n)) < 0.01),
+      );
+
+    test("음표마다 시작 시각이 다르다 — 룩어헤드만큼 밀려서", () => {
+      const { started } = withContext(() => {
+        const s = new SineSynth();
+        s.playSequence([
+          { midi: 60, startSec: 0, endSec: 0.5 },
+          { midi: 62, startSec: 1, endSec: 1.5 },
+        ]);
+      });
+      const heads = fundamentals(started, [60, 62]);
+      expect(heads).toHaveLength(2);
+      expect(heads[0].start).toBeCloseTo(SEQUENCE_LOOKAHEAD, 9);
+      expect(heads[1].start).toBeCloseTo(SEQUENCE_LOOKAHEAD + 1, 9);
+    });
+
+    test("음표마다 길이가 다르다 — playNotes의 스칼라 duration과 갈리는 자리다", () => {
+      const { envelopes } = withContext(() => {
+        const s = new SineSynth();
+        s.playSequence([
+          { midi: 60, startSec: 0, endSec: 0.25 },
+          { midi: 60, startSec: 1, endSec: 3 },
+        ]);
+      });
+      // 게인 노드는 음표마다 배음 수(4)만큼 생긴다. 각 음표의 기본음이 0번과 4번.
+      const last = (i: number) => envelopes[i].at(-1)!.time;
+      expect(last(0)).toBeCloseTo(SEQUENCE_LOOKAHEAD + 0.25, 6);
+      expect(last(4)).toBeCloseTo(SEQUENCE_LOOKAHEAD + 3, 6);
+    });
+
+    test("fromSec 이전에 끝나는 음표는 건너뛰고, 걸쳐 있는 것은 남긴다", () => {
+      const { started } = withContext(() => {
+        const s = new SineSynth();
+        s.playSequence(
+          [
+            // 완전히 지나갔다
+            { midi: 60, startSec: 0, endSec: 1 },
+            // 재생 지점에 걸쳐 있다 — 시작만 보고 거르면 이게 사라진다
+            { midi: 62, startSec: 1.5, endSec: 3 },
+            { midi: 64, startSec: 3, endSec: 4 },
+          ],
+          2,
+        );
+      });
+      expect(fundamentals(started, [60])).toHaveLength(0);
+      const kept = fundamentals(started, [62, 64]);
+      expect(kept).toHaveLength(2);
+      // 걸쳐 있는 음표는 재생 지점(=룩어헤드)에서 바로 시작한다
+      expect(kept[0].start).toBeCloseTo(SEQUENCE_LOOKAHEAD, 9);
+      expect(kept[1].start).toBeCloseTo(SEQUENCE_LOOKAHEAD + 1, 9);
+    });
+
+    test("빈 배열이면 아무것도 예약하지 않고 조용한 손잡이를 준다", () => {
+      const { result, started } = withContext(() => {
+        const s = new SineSynth();
+        return s.playSequence([]);
+      });
+      expect(started).toHaveLength(0);
+      expect(result.positionSec()).toBeNull();
+    });
+
+    test("위치는 AudioContext 시계를 따른다", () => {
+      const { result, ctx } = withContext(() => {
+        const s = new SineSynth();
+        return s.playSequence([{ midi: 60, startSec: 0, endSec: 5 }]);
+      });
+      // 룩어헤드 동안에는 아직 시작 전이다 — 음수 대신 0에서 잡아 둔다
+      expect(result.positionSec()).toBe(0);
+      ctx.currentTime = SEQUENCE_LOOKAHEAD + 1.25;
+      expect(result.positionSec()).toBeCloseTo(1.25, 9);
+    });
+
+    test("fromSec에서 시작하면 위치도 거기서부터 센다", () => {
+      const { result, ctx } = withContext(() => {
+        const s = new SineSynth();
+        return s.playSequence([{ midi: 60, startSec: 0, endSec: 10 }], 4);
+      });
+      expect(result.positionSec()).toBe(4);
+      ctx.currentTime = SEQUENCE_LOOKAHEAD + 1;
+      expect(result.positionSec()).toBeCloseTo(5, 9);
+    });
+
+    test("멈추면 위치가 null이 된다", () => {
+      const { result } = withContext(() => {
+        const s = new SineSynth();
+        return s.playSequence([{ midi: 60, startSec: 0, endSec: 5 }]);
+      });
+      result.stop();
+      expect(result.positionSec()).toBeNull();
+      // 두 번 불러도 안전하다
+      expect(() => result.stop()).not.toThrow();
+    });
+
+    /**
+     * 손잡이가 백엔드의 상태를 함께 본다는 것을 못박는다. 손잡이 안에만
+     * 두면 소리는 끊겼는데 커서만 혼자 흘러간다.
+     */
+    test("다음 재생이 앞의 손잡이를 무효로 만든다", () => {
+      const { result } = withContext(() => {
+        const s = new SineSynth();
+        const first = s.playSequence([{ midi: 60, startSec: 0, endSec: 5 }]);
+        s.playSequence([{ midi: 67, startSec: 0, endSec: 5 }]);
+        return first;
+      });
+      expect(result.positionSec()).toBeNull();
+    });
+
+    test("백엔드를 직접 멈춰도 손잡이가 안다", () => {
+      const { result } = withContext(() => {
+        const s = new SineSynth();
+        const handle = s.playSequence([{ midi: 60, startSec: 0, endSec: 5 }]);
+        s.stop();
+        return handle;
+      });
+      expect(result.positionSec()).toBeNull();
+    });
+  });
 });
 
 describe("NullSynth", () => {
@@ -192,8 +380,11 @@ describe("NullSynth", () => {
     const s = new NullSynth();
     expect(() => {
       s.playNotes([60], 1);
+      s.playSequence([{ midi: 60, startSec: 0, endSec: 1 }]);
       s.stop();
     }).not.toThrow();
+    // 조용한 손잡이는 위치를 모른다 — 화면이 커서를 그리지 않는다
+    expect(s.playSequence([]).positionSec()).toBeNull();
     vi.unstubAllGlobals();
   });
 });

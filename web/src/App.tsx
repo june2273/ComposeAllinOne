@@ -15,6 +15,8 @@ import { makeAudioBackend } from "./platform/piano";
 import type { Result } from "./core/session";
 import { NavBar } from "./ds";
 import { AnalysisPage } from "./ui/analysis";
+import { PdfScorePage } from "./ui/pdfscore";
+import { FreePlayPage } from "./ui/freeplay";
 import {
   CatalogPage,
   HomePage,
@@ -59,7 +61,16 @@ function ActivityScreen({
   onOptions: () => void;
 }) {
   if (activity.status === Status.Planned) return <PlannedPage activity={activity} />;
-  if (activity.kind === Kind.Tool) return <AnalysisPage />;
+  // 도구는 종류만으로 못 고른다 — 저마다 다른 것을 다루는 별개의 화면이라
+  // 공통 틀이 없다(문항형이 `config`로 하나의 화면을 공유하는 것과 갈리는 자리다).
+  // 모르는 도구는 준비 중으로 보낸다: 카탈로그에 올렸는데 화면을 안 만든 경우다.
+  if (activity.kind === Kind.Tool) {
+    if (activity.id === "analysis.console") return <AnalysisPage audio={audio} />;
+    if (activity.id === "analysis.pdf") return <PdfScorePage />;
+    return <PlannedPage activity={activity} />;
+  }
+  // 자유 연주는 세션이 아니다 — 옵션(제한시간·라운드)도 결과 화면도 지나지 않는다.
+  if (activity.kind === Kind.Free) return <FreePlayPage audio={audio} />;
   if (activity.kind === Kind.Quiz && activity.config) {
     return (
       <QuizPage

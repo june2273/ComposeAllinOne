@@ -120,7 +120,8 @@ export function useSession(
     if (!q || !session.mayPlay()) return;
     session.notePlayed();
     audio.playNotes(
-      q.answerNotes,
+      // 답과 다를 수 있다 — 음정 해석은 **주어진 음**만 울린다
+      q.cueNotes ?? q.answerNotes,
       config.playDurationSec,
       config.difficulty.playMode,
     );

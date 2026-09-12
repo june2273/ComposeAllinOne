@@ -4,7 +4,7 @@
  * 실행하면서 값이 두 번 반영될 수 있다. 실제 앱은 StrictMode로 뜨므로
  * (src/main.tsx) 여기서 잡아야 한다. */
 import { StrictMode } from "react";
-import { act, render } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import { NullSynth } from "../src/core/audio";
@@ -21,6 +21,15 @@ const press = (key: string) =>
   act(() => {
     window.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
   });
+
+/** 본 단계는 답을 글자로 받는다. 치고 Enter를 누르는 것이 한 번의 제출이다 */
+function answer(text: string) {
+  const input = screen.getByLabelText("답");
+  act(() => {
+    fireEvent.change(input, { target: { value: text } });
+    fireEvent.keyDown(input, { key: "Enter", isComposing: false });
+  });
+}
 
 test("StrictMode에서 숫자가 두 번 반영되지 않는다 (연습 1)", async () => {
   render(
@@ -49,13 +58,12 @@ test("StrictMode에서 제출이 두 번 나가지 않는다 (본 단계)", asyn
       />
     </StrictMode>,
   );
-  // 도수와 성질이 다 차는 순간 제출된다. 업데이터 안에서 불렀다면 두 번 나간다.
+  // Enter 한 번이 제출 한 번이다. 이펙트가 두 번 돌면 두 번 나간다.
   for (let i = 0; i < 2; i += 1) {
     await act(async () => {
       vi.advanceTimersByTime(250);
     });
-    press("3");
-    press("M");
+    answer("장3");
     await act(async () => {
       vi.advanceTimersByTime(2400);
     });
@@ -82,9 +90,7 @@ test("StrictMode에서도 문제 수와 채점이 어긋나지 않는다", async
       vi.advanceTimersByTime(250);
     });
     seen.push(document.querySelector(".quiz__head span")?.textContent ?? "");
-    press("2");
-    press("2");
-    press("M");
+    answer("장2");
     await act(async () => {
       vi.advanceTimersByTime(2400);
     });
@@ -103,10 +109,8 @@ test("StrictMode에서 락아웃 중 입력이 새지 않는다", async () => {
       <QuizPage config={DIATONIC_INTERVALS} audio={new NullSynth()} onFinished={() => {}} />
     </StrictMode>,
   );
-  // 락아웃(200ms) 안에서 답을 만들어 본다
-  press("3");
-  press("4");
-  press("M");
+  // 락아웃(200ms) 안에서 답을 만들어 본다. 답 칸은 이때 잠겨 있다
+  answer("장3");
   await act(async () => {
     vi.advanceTimersByTime(250);
   });

@@ -10,6 +10,13 @@
  * 활동 종류(catalog.Kind)에 따라 화면이 갈린다. **QuizPage는 문항형 전용이다.**
  * 코드 학습(연주형)이나 분석 콘솔(도구)을 여기에 태우지 말 것.
  *
+ * ## 건반으로 답하는 스테이지의 입력 경로는 셋이다
+ *
+ * MIDI 건반 · 자판 · **화면의 가상 건반**. 셋이 전부 `useSession.noteOn` 하나로
+ * 모이므로 락아웃·화음 확정 규칙이 똑같이 걸린다. 가상 건반은 **MIDI가 연결돼
+ * 있지 않으면 기본으로 펴진다** — 그러지 않으면 `MidiStage`가 아무것도 그리지
+ * 않아 화면에 답할 방법이 하나도 안 보인다(자판 폴백은 아는 사람만 안다).
+ *
  * ## 옵션은 활동이 아니라 **한 번의 실행**에 붙는다
  *
  * 제한시간·라운드는 `CatalogPage`의 오른쪽에서 고르고 `withOptions()`로 활동의
@@ -29,22 +36,26 @@ import {
   isReady,
 } from "../core/catalog";
 import {
+  DEFAULT_OPTIONS,
   type PracticeOptions,
   ROUND_STEPS,
   type SessionConfig,
   TIME_STEPS,
+  isIntervalStage,
   optionsOf,
   stepIndex,
+  withOptions,
 } from "../core/config";
+import { NO_SHIFT, noteFor, rangeKeys } from "../core/keyboard";
 import { isStageResponse, responseText } from "../core/questions";
 import { type Result, timedOut } from "../core/session";
-import { noteNames } from "../core/theory";
+import { noteName, noteNames } from "../core/theory";
 import type { AudioBackend } from "../core/audio";
 import {
   Button,
   Card,
-  DeviceStatus,
   Fieldset,
+  Keyboard,
   MenuList,
   Overlay,
   PageHeading,
@@ -58,12 +69,12 @@ import {
   TimerBar,
   Toggle,
   Verdict,
-  type DeviceState,
   type ScoreRowProps,
   type VerdictTone,
 } from "../ds";
-import type { MidiEnv, MidiStatus } from "../platform/midi";
+import type { MidiEnv } from "../platform/midi";
 import { stageFor, usesMidiInput, usesTable } from "./stages";
+import { MidiRow } from "./components";
 import { useMidi } from "./useMidi";
 import { useSession } from "./useSession";
 
@@ -102,15 +113,36 @@ export function HomePage({
   );
 }
 
+/** 초점이 글자를 받는 칸에 있는가. 창 전체 단축키가 비켜야 할 자리다 */
+function isTyping(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  return (
+    target.tagName === "INPUT" ||
+    target.tagName === "TEXTAREA" ||
+    target.isContentEditable
+  );
+}
+
 const KIND_LABEL: Record<Kind, string> = {
   [Kind.Quiz]: "문항형",
   [Kind.Performance]: "연주형",
   [Kind.Tool]: "도구",
+  [Kind.Free]: "자유 연주",
 };
 
 /** 눈금 문구. `null`이 무한이라는 것을 아는 곳은 여기와 core/config뿐이다. */
 const TIME_LABELS = TIME_STEPS.map((v) => (v === null ? "무한" : `${v}초`));
 const ROUND_LABELS = ROUND_STEPS.map((v) => (v === null ? "무한" : `${v}라운드`));
+
+/**
+ * 음정 활동의 옵션 눈금.
+ *
+ * **단계는 눈금이 곧 `LEVEL_CONFIGS`의 인덱스**이고, 순서가 학습 순서다.
+ * 음 범위는 음 하나에 붙일 임시표 수(`maxAlter`)다 — 늘리면 증·감이 늘고
+ * 겹증·겹감, 겹겹증·겹겹감까지 나온다.
+ */
+const LEVEL_LABELS = ["연습 1 — 도수·반음", "연습 2 — 성질", "음정 이름"];
+const ALTER_LABELS = ["온음계", "반음계 ♯♭", "겹임시표 ♯♯♭♭"];
 
 /**
  * 2분할의 오른쪽 — 고른 활동이 무엇이고 어떤 설정으로 시작할지.
@@ -132,13 +164,20 @@ function ActivityDetail({
   const [options, setOptions] = useState<PracticeOptions>(
     () =>
       initialOptions ??
-      (activity.config
-        ? optionsOf(activity.config)
-        : { timeLimitSec: 10, rounds: 10, showTable: false }),
+      (activity.config ? optionsOf(activity.config) : DEFAULT_OPTIONS),
   );
   const ready = isReady(activity);
   // 옵션이 뜻을 갖는 것은 문항형뿐이다. 도구는 제한시간도 라운드도 없다.
   const tunable = ready && activity.kind === Kind.Quiz && activity.config !== undefined;
+  // 음정 활동만 단계·음 범위·겹음정을 갖는다. **지금 고른 단계의 스테이지**를
+  // 봐야 한다 — 활동의 기본 스테이지를 보면 단계를 옮겨도 표 보기가 안 따라온다.
+  const interval = activity.config !== undefined && isIntervalStage(activity.config.stage);
+  // **지금 옵션이 만들어 낼 스테이지**를 그대로 묻는다. 단계·음정 해석이
+  // 어느 프리셋을 고르는지는 `withOptions` 한 곳만 알면 된다 — 여기서 다시
+  // 계산하면 옵션이 늘 때마다 두 곳이 갈린다.
+  const stage = activity.config
+    ? withOptions(activity.config, options).stage
+    : undefined;
 
   return (
     <Stack>
@@ -171,9 +210,49 @@ function ActivityDetail({
             hint="무한으로 두면 ESC를 눌러 멈출 때까지 계속된다"
             onChange={(i) => setOptions((o) => ({ ...o, rounds: ROUND_STEPS[i] }))}
           />
+          {interval && (
+            <>
+              {/* 음정 해석에는 단계가 없다 — 스테이지가 하나뿐이라 눈금이
+                  아무것도 안 바꾼다. 켜져 있는 동안 감춘다 */}
+              {!options.build && (
+                <StepSlider
+                  label="단계"
+                  steps={LEVEL_LABELS}
+                  index={options.level}
+                  hint="연습 1은 세는 법, 연습 2는 표 읽기, 음정 이름은 둘을 합친 것"
+                  onChange={(level) => setOptions((o) => ({ ...o, level }))}
+                />
+              )}
+              <Toggle
+                label="음정 해석"
+                hint="음 하나와 음정을 주면 나머지 음을 건반에서 찾는다. G4 · 장2도 · 위로면 A4 — 위·아래가 섞여 나온다"
+                checked={options.build}
+                onChange={(build) => setOptions((o) => ({ ...o, build }))}
+              />
+              <StepSlider
+                label="음 범위"
+                steps={ALTER_LABELS}
+                index={options.maxAlter}
+                hint="임시표를 허용하면 증·감이 늘고 겹증·겹감까지 나온다"
+                onChange={(maxAlter) => setOptions((o) => ({ ...o, maxAlter }))}
+              />
+              <Toggle
+                label="겹음정"
+                hint="9도 이상도 낸다. 보이는 그대로 답한다 (E♭4–F5는 장9도)"
+                checked={options.compound}
+                onChange={(compound) => setOptions((o) => ({ ...o, compound }))}
+              />
+              <Toggle
+                label="낮은음자리표"
+                hint="낮은 자리의 음도 낸다. 자리표는 음이 정하므로 높은음자리표와 섞여 나온다"
+                checked={options.bassClef}
+                onChange={(bassClef) => setOptions((o) => ({ ...o, bassClef }))}
+              />
+            </>
+          )}
           {/* 참고표가 있는 스테이지에서만 나온다 — 없는 화면에 켜 두면
               아무 일도 일어나지 않아 옵션이 고장 난 것처럼 보인다 */}
-          {activity.config && usesTable(activity.config.stage) && (
+          {stage !== undefined && usesTable(stage) && (
             <Toggle
               label="표 보기"
               hint="음정표를 문제 화면에 함께 띄운다. 익으면 끄고 풀 것"
@@ -270,17 +349,6 @@ function answerLabel(response: unknown): string {
   return String(response);
 }
 
-/** MIDI 상태를 화면의 점 색으로. `ready`만 초록이다. */
-const DEVICE_STATE: Record<MidiStatus, DeviceState> = {
-  ready: "ok",
-  requesting: "warn",
-  "no-device": "warn",
-  denied: "warn",
-  unsupported: "off",
-  insecure: "off",
-  error: "off",
-};
-
 export function QuizPage({
   config,
   audio,
@@ -302,6 +370,12 @@ export function QuizPage({
   );
   const StageView = stageFor(config.stage);
   const midiStage = usesMidiInput(config.stage);
+  const { noteLow: low, noteHigh: high } = config.difficulty;
+  /**
+   * 가상 건반을 편다. `null`이면 **MIDI 연결 여부가 정한다** — 사용자가 한 번
+   * 접거나 펴면 그 뒤로는 그 선택을 따른다(그래서 boolean|null이다).
+   */
+  const [showKeys, setShowKeys] = useState<boolean | null>(null);
 
   // 건반 → Session.collect(). 자판 폴백과 정확히 같은 경로를 지난다.
   const midi = useMidi(
@@ -323,10 +397,6 @@ export function QuizPage({
   // Space = 다시 듣기. 자판 폴백은 MIDI 스테이지에서만 (음정 스테이지는
   // 같은 키를 숫자·성질 입력에 쓰므로 stages.tsx가 먼저 가져간다).
   useEffect(() => {
-    const KEY_FALLBACK: Record<string, number> = {
-      a: 60, w: 61, s: 62, e: 63, d: 64, f: 65, t: 66,
-      g: 67, y: 68, h: 69, u: 70, j: 71, k: 72,
-    };
     const onKey = (event: KeyboardEvent) => {
       if (event.repeat) return;
       // ESC는 어느 스테이지에서든 일시정지다. 무한 라운드에서 멈출 방법이
@@ -340,6 +410,13 @@ export function QuizPage({
       // 멈춰 있는 동안의 키는 전부 버린다. Session의 accepting 게이트가 이미
       // 막지만, 다시 듣기(Space)는 그 게이트 밖이라 여기서 막아야 한다.
       if (view.paused) return;
+      /*
+        **답을 글자로 받는 스테이지에서는 스페이스가 글자다.** 여기서 그대로
+        가로채면 `preventDefault` 때문에 입력 칸에 공백이 안 들어가고, 치는 중에
+        문제가 다시 울린다. 초점이 입력 칸에 있으면 아래를 통째로 비켜 준다 —
+        ESC는 위에서 이미 처리했다(무한 라운드를 멈출 방법이 그것뿐이다).
+      */
+      if (isTyping(event.target)) return;
       if (event.code === "Space") {
         event.preventDefault();
         replay();
@@ -348,17 +425,24 @@ export function QuizPage({
       // 음정 스테이지는 같은 글자키를 성질 선택에 쓰므로 자판 폴백을 끈다
       // (stages.tsx가 먼저 가져간다). MIDI도 같은 조건으로 꺼진다.
       if (!usesMidiInput(config.stage)) return;
-      const note = KEY_FALLBACK[event.key.toLowerCase()];
-      if (note !== undefined) {
-        event.preventDefault();
-        noteOn(note);
-      }
+      // 표를 여기에 또 적지 않는다 — 화면의 가상 건반이 같은 표를 보고 글자를
+      // 그리므로, 둘이 갈리면 **건반에 적힌 글자를 눌렀는데 다른 음이 난다.**
+      const note = noteFor(NO_SHIFT, event.code);
+      // 이 스테이지의 음역 밖은 애초에 답이 될 수 없다(화면에도 안 그려진다).
+      if (note === null || note < low || note > high) return;
+      event.preventDefault();
+      noteOn(note);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [config.stage, noteOn, pause, replay, resume, view.paused]);
+  }, [config.stage, high, low, noteOn, pause, replay, resume, view.paused]);
 
   const { question, result, remaining, ratio } = view;
+  // **연결돼 있지 않으면 편다.** 상태가 아직 "requesting"인 동안에도 펴 두는
+  // 편이 낫다 — 권한 확인이 끝날 때까지 화면이 비어 있는 것보다는 낫고,
+  // 실제로 연결되면 접힌다.
+  const virtualKeys = showKeys ?? midi.status !== "ready";
+  const keys = midiStage ? rangeKeys(low, high) : [];
   const verdict: { text: string; tone: VerdictTone } = result
     ? result.correct
       ? { text: "정답", tone: "correct" }
@@ -370,13 +454,7 @@ export function QuizPage({
   return (
     <Stack>
       {midiStage && (
-        <DeviceStatus
-          label="MIDI"
-          state={DEVICE_STATE[midi.status]}
-          detail={midi.message}
-          actionLabel={midi.status === "unsupported" ? undefined : "다시 찾기"}
-          onAction={midi.refresh}
-        />
+        <MidiRow midi={midi} />
       )}
       <SessionHeader progress={view.progressText} score={view.score} />
       <TimerBar
@@ -395,8 +473,40 @@ export function QuizPage({
           question={question}
           locked={result !== null || !view.accepting}
           showTable={config.showTable}
+          maxNumber={config.difficulty.maxIntervalNumber}
+          maxAlter={config.difficulty.maxAlter}
           onAnswer={respond}
         />
+      )}
+
+      {midiStage && (
+        <div className="quiz__keyboard">
+          {virtualKeys && (
+            <>
+              <Keyboard
+                label="가상 건반"
+                keys={keys.map((key) => ({
+                  id: String(key.midi),
+                  // 여기서 고르는 것은 **음높이**다(자유 연주는 자판 자리를
+                  // 고른다). 그래서 큰 글자와 작은 글자가 서로 반대다.
+                  label: noteName(key.midi),
+                  caption: key.label,
+                  black: key.black,
+                }))}
+                // 스치고 지나간 건반이 전부 답으로 들어가면 안 된다
+                glide={false}
+                onPress={(id) => noteOn(Number(id))}
+              />
+              <p className="muted quiz__hint">
+                자판 <b>{keys.filter((k) => k.label).map((k) => k.label).join(" ")}</b>
+                로도 칠 수 있다
+              </p>
+            </>
+          )}
+          <Button onClick={() => setShowKeys(!virtualKeys)}>
+            {virtualKeys ? "가상 건반 접기" : "가상 건반 펴기"}
+          </Button>
+        </div>
       )}
 
       <div className="spacer" />

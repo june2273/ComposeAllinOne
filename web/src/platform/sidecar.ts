@@ -11,6 +11,11 @@
  * 방침이다. 감지 타임아웃을 짧게 둔 것도 그래서다(서버가 없을 때 화면이
  * 굳으면 안 된다).
  *
+ * **개발 서버가 이 사이드카를 직접 띄운다**(`vite-sidecar.ts`, 2026-09-04).
+ * 그래서 "아직 안 떴다"와 "없다"가 갈렸고, 앞을 기다리는 것이
+ * `waitForSidecar()`다 — 사용자가 명령을 치지 않게 하려면 화면도 기동을
+ * 기다릴 줄 알아야 한다.
+ *
  * Tauri로 가면 이 파일이 갈리는 자리다 — 사이드카를 앱이 직접 띄우게 되면
  * 포트 대신 IPC가 되지만, 위층이 보는 `analyzeWithSidecar`의 모양은 같다.
  */
@@ -18,11 +23,26 @@
 import type { RawSegment } from "../core/analysis";
 import type { PitchCurve } from "../core/transcribe";
 
-/** 서버의 기본 포트. `server/app/main.py`의 DEFAULT_PORT와 같아야 한다 */
-export const SIDECAR_URL = "http://127.0.0.1:8420";
+/**
+ * 서버 주소. **같은 출처에서 열렸으면 상대 경로다**(2026-09-12).
+ *
+ * 빌드된 앱은 이제 사이드카가 직접 서빙한다(`server/app/main.py` 맨 끝의
+ * StaticFiles 마운트) — 템포·박자가 그 프로세스에서 나오므로 앱이 사이드카
+ * 없이는 아무것도 못 그리기 때문이다. 그때 절대 주소를 쓰면 포트를 바꿔 띄운
+ * 경우 CORS로 막히고, 무엇보다 **틀린 곳을 가리킨다.**
+ *
+ * 개발 서버(5173)에서는 출처가 다르므로 절대 주소로 물러난다.
+ * `server/app/main.py`의 `DEFAULT_PORT`와 같아야 한다.
+ */
+export const SIDECAR_URL =
+  typeof location !== "undefined" && location.port === "8420"
+    ? ""
+    : "http://127.0.0.1:8420";
 
 /** 감지 타임아웃. 로컬이라 이보다 늦으면 없는 것으로 친다 */
 const DETECT_TIMEOUT_MS = 1200;
+/** 기동을 기다리며 다시 물어보는 간격 (`waitForSidecar`) */
+const STARTUP_RETRY_MS = 1500;
 /** 진행 상황을 물어보는 간격. 분리가 수 분이라 자주 물을 이유가 없다 */
 const POLL_MS = 700;
 
@@ -76,6 +96,23 @@ export interface SidecarStructure {
   readonly segments: readonly RawSegment[];
 }
 
+/**
+ * `POST /beats`의 응답 — **템포·박자의 유일한 출처**(`server/app/beats.py`).
+ *
+ * `SidecarStructure`의 `beats`·`downbeats`와 이름이 겹치지만 **다른 것이다.**
+ * 저쪽은 allin1이 구간 라벨을 내면서 곁들이는 값이고 우리 격자가 아니다
+ * (`structure.tsx`가 둘을 나란히 보여 주는 이유가 그것이다).
+ */
+export interface SidecarBeats {
+  readonly engine: string;
+  readonly bpm: number;
+  readonly beatsPerBar: number;
+  readonly beats: readonly number[];
+  readonly downbeats: readonly number[];
+  /** 캐시에서 왔는가. 화면은 안 쓰고 하니스·디버깅용이다 */
+  readonly cached?: boolean;
+}
+
 export interface SidecarProgress {
   readonly stage: string;
   readonly ratio: number;
@@ -120,6 +157,38 @@ export async function detect(env: SidecarEnv = {}): Promise<SidecarHealth | null
     return body.models ? body : null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * 뜰 때까지 되풀이해서 묻는다. **못 찾으면 `null`이지 던지지 않는다.**
+ *
+ * `detect()` 한 번으로는 부족해진 것은 개발 서버가 사이드카를 직접 띄우게
+ * 됐기 때문이다(`vite-sidecar.ts`) — torch·onnxruntime을 import하느라 기동에
+ * 십수 초가 걸리는데, 그동안 한 번 묻고 "꺼져 있다"고 말하면 자동 실행이
+ * 있으나 마나가 된다.
+ *
+ * **`budgetMs <= 0`이면 `detect()` 한 번과 정확히 같다** — 빌드된 앱에는
+ * 띄워 줄 개발 서버가 없어서 기다리는 것이 거짓말이 되므로, 기다릴지 말지는
+ * 부르는 쪽이 정한다.
+ */
+export async function waitForSidecar(
+  env: SidecarEnv = {},
+  budgetMs = 0,
+  retryMs = STARTUP_RETRY_MS,
+  signal?: AbortSignal,
+): Promise<SidecarHealth | null> {
+  const deadline = Date.now() + budgetMs;
+  for (;;) {
+    const found = await detect(env);
+    if (found) return found;
+    if (signal?.aborted || Date.now() + retryMs > deadline) return null;
+    // 취소는 "못 찾았다"이지 오류가 아니다 — 화면을 떠난 것뿐이다
+    try {
+      await sleep(retryMs, signal);
+    } catch {
+      return null;
+    }
   }
 }
 
@@ -219,6 +288,31 @@ async function optional<T>(
     if (signal?.aborted) throw failure;
     return null;
   }
+}
+
+/**
+ * 비트·다운비트·BPM·마디당 박. **분석의 첫 단계이자 필수다.**
+ *
+ * `analyzeWithSidecar`(스템·f0)와 달리 **작업 큐를 안 탄다** — 곡당 2~4초라
+ * 동기 요청 하나로 끝나고, 무엇보다 이건 화면이 무엇이든 그리기 전에 있어야
+ * 하는 값이라 폴링을 끼우면 첫 화면이 그만큼 늦어진다.
+ *
+ * **오류를 삼키지 않는다.** `optional()`을 쓰는 구조·메타와 다른 점이다 —
+ * 그쪽은 없어도 나머지가 나오지만 격자가 없으면 분석 자체가 성립하지 않는다.
+ */
+export async function fetchBeats(
+  file: Blob,
+  env: SidecarEnv = {},
+  signal?: AbortSignal,
+): Promise<SidecarBeats> {
+  const base = env.baseUrl ?? SIDECAR_URL;
+  const send = env.fetch ?? fetch;
+  const form = new FormData();
+  // **원래 파일 이름을 지킨다.** 서버가 확장자로 디코더를 고른다.
+  form.append("file", file, (file as File).name || "audio.wav");
+  const response = await send(`${base}/beats`, { method: "POST", body: form, signal });
+  if (!response.ok) throw new Error(await detail(response, "비트를 받지 못했습니다"));
+  return (await response.json()) as SidecarBeats;
 }
 
 async function json<T>(

@@ -30,6 +30,7 @@ import {
   type RawSegment,
   sectionsFromSegments,
 } from "../../src/core/analysis";
+import { gridFor } from "./truth";
 import { loadMono } from "./wav";
 
 const CACHE = process.env.EVAL_CACHE ?? "../server/cache";
@@ -60,7 +61,7 @@ test("구조 — 우리 섹션을 정답 형식으로", { timeout: 60 * 60_000 }
       segments?: RawSegment[];
     };
     // 우리 다운비트가 필요하다 — 마디 좌표가 거기서 난다
-    const analysis = analyzeAudio(loadMono(audioPath), ANALYSIS_RATE);
+    const analysis = analyzeAudio(loadMono(audioPath), gridFor(slot), ANALYSIS_RATE);
     const sections = sectionsFromSegments(
       raw.segments ?? [],
       analysis.downbeats,

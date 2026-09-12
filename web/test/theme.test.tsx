@@ -232,7 +232,9 @@ describe("설정 창", () => {
 
   test("아직 안 되는 것을 적어 둔다 — 빈칸으로 두지 않는다", () => {
     render(<SettingsDialog theme="system" dark={false} onTheme={() => {}} onClose={() => {}} />);
-    expect(screen.getByText(/MIDI 연결/)).toBeTruthy();
+    // **MIDI 연결은 이 목록에서 빠졌다** — 실제로 보여 주게 됐기 때문이다
+    // (`midi.test.tsx`의 "설정 창의 MIDI 칸"). 남은 것은 포트를 고르는 화면이다.
+    expect(screen.getByText(/MIDI 포트 고르기/)).toBeTruthy();
     expect(screen.getByText(/사운드 출력 기기/)).toBeTruthy();
   });
 });

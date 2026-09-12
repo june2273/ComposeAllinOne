@@ -15,14 +15,11 @@
 import type { ChordEvent } from "../core/analysis";
 import { confidenceTier } from "../core/analysis";
 import { Fieldset, Matrix } from "../ds";
+import { clock } from "./format";
 
 /** 코드가 안 바뀐 마디에 찍는 글자. 빈 칸이면 "못 잡았다"로 읽힌다 */
 const SUSTAIN = "·";
 
-function clock(value: number): string {
-  const minutes = Math.floor(value / 60);
-  return `${minutes}:${String(Math.floor(value % 60)).padStart(2, "0")}`;
-}
 
 export interface ChordCardProps {
   readonly chords: readonly ChordEvent[];

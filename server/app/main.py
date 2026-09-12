@@ -26,8 +26,9 @@ from typing import AsyncIterator, Callable
 from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
-from . import melody, stems, structure
+from . import beats, melody, stems, structure
 from .audio import process_vocal, read_audio, write_audio
 from .health import Probe
 from .jobs import Cancelled, Job, JobStore, digest_of
@@ -53,6 +54,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             "stems": (stems.available, stems.selftest),
             "melody": (melody.available, melody.selftest),
             "structure": (structure.available, structure.selftest),
+            "beats": (beats.available, beats.selftest),
         }
     )
     yield
@@ -90,11 +92,13 @@ def health() -> dict:
         "stems": probe.get("stems"),
         "melody": probe.get("melody"),
         "structure": probe.get("structure"),
+        "beats": probe.get("beats"),
     }
     installed = {
         "stems": stems.available,
         "melody": melody.available,
         "structure": structure.available,
+        "beats": beats.available,
     }
     return {
         "ok": True,
@@ -346,6 +350,44 @@ def _cache_hit(out_dir: Path) -> bool:
     return True
 
 
+@app.post("/beats")
+async def track_beats(file: UploadFile) -> dict:
+    """비트·다운비트·BPM·마디당 박. **작업 큐를 안 탄다.**
+
+    스템·f0는 수 분이라 접수와 폴링을 갈라야 했지만(브라우저·프록시의 유휴
+    타임아웃이 보통 60~120초다) 비트는 **곡당 2~4초**다. 동기로 답하는 편이
+    호출부가 훨씬 단순하고, 무엇보다 이건 **앱이 아무것도 그리기 전에 필요한
+    값**이라 폴링을 끼우면 첫 화면이 그만큼 늦어진다.
+
+    캐시는 같은 슬롯(`cache/<내용 해시>/beats.json`)을 쓰되 **무효화가 그 파일
+    안에서 끝난다** — `meta.json`·`_cache_hit`에 손대면 스템·f0 캐시를 깰 위험만
+    지고 얻는 것이 없다. 엔진이 다르면 `beats.read`가 `None`을 준다.
+    """
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="빈 파일입니다")
+    if not _usable("beats", beats.available):
+        # **503이다.** 4xx로 내면 웹이 "이 파일이 문제"로 읽는데 실제로는
+        # 서버 쪽 설치 문제다. 무엇이 왜 안 되는지는 `/health`의 `checks`에 있다.
+        raise HTTPException(status_code=503, detail="비트 추적 모델을 쓸 수 없습니다")
+
+    out_dir = store.slot(digest_of(data))
+    cached = beats.read(out_dir)
+    if cached is not None:
+        return {**cached, "cached": True}
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    source = out_dir / f"input{Path(file.filename or 'audio.wav').suffix or '.wav'}"
+    # **이미 있으면 다시 쓰지 않는다.** 같은 슬롯을 `/jobs`가 쓰고 있을 수 있고,
+    # 그때 같은 경로에 겹쳐 쓰면 분리 중인 파일을 갈아 치운다.
+    if not source.exists():
+        source.write_bytes(data)
+
+    result = beats.analyze(source)
+    beats.write(result, out_dir)
+    return {**result, "cached": False}
+
+
 @app.post("/jobs")
 async def create_job(file: UploadFile) -> dict:
     data = await file.read()
@@ -436,3 +478,21 @@ def job_audio(job_id: str, name: str) -> FileResponse:
     if path is None or not path.exists():
         raise HTTPException(status_code=404, detail="없는 오디오입니다")
     return FileResponse(path, media_type="audio/wav", filename=f"{name}.wav")
+
+
+#: 빌드된 웹 앱. **사이드카가 앱을 서빙한다**(2026-09-12).
+#:
+#: 템포·박자가 이 프로세스에서 나오게 되면서 **앱이 사이드카 없이는 아무것도 못
+#: 그린다.** 예전 방침("없어도 앱은 뜬다")이 성립하지 않는데, 빌드된 앱에는
+#: 개발 서버의 자동 실행이 없다(`vite-sidecar.ts`가 `apply: "serve"`다).
+#:
+#: 그래서 의존 방향을 뒤집었다 — 앱을 여기서 내보내면 **앱이 보이는 순간
+#: 사이드카는 정의상 켜져 있다.** 사용자가 띄울 프로세스가 하나로 줄고 Tauri도
+#: 필요 없어진다. 동일 출처가 되므로 웹의 `SIDECAR_URL`도 상대 경로가 된다.
+_DIST = ROOT.parent / "web" / "dist"
+
+#: **반드시 맨 끝이다.** `/`에 마운트하므로 위의 API 라우트보다 먼저 걸면
+#: `/health`·`/jobs`·`/beats`를 전부 정적 파일 서버가 가로챈다.
+#: `html=True`는 없는 경로에 `index.html`을 주는 SPA 폴백이다.
+if _DIST.is_dir():
+    app.mount("/", StaticFiles(directory=_DIST, html=True), name="app")

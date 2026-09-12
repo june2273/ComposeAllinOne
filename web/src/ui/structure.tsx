@@ -15,22 +15,12 @@
 
 import type { Section } from "../core/analysis";
 import { Fieldset, Matrix } from "../ds";
+import { clock, titleCase } from "./format";
 
 /** 우리 BPM과 이만큼 넘게 다르면 "다른 읽기"로 함께 띄운다 */
 const BPM_DISAGREE = 0.05;
 
-function clock(value: number): string {
-  const minutes = Math.floor(value / 60);
-  return `${minutes}:${String(Math.floor(value % 60)).padStart(2, "0")}`;
-}
 
-/** `pre-chorus` → `Pre-Chorus`. 표시용이고 값은 안 바꾼다 */
-function title(label: string): string {
-  return label
-    .split("-")
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join("-");
-}
 
 export interface StructureCardProps {
   readonly sections: readonly Section[];
@@ -54,7 +44,7 @@ export function StructureCard({ sections, modelBpm, ourBpm }: StructureCardProps
           // **인덱스를 반드시 앞에 붙인다.** `ds.Matrix`가 첫 칸을 React 키로
           // 쓰는데, 구조 표는 `Verse`가 두 번 나오는 것이 정상이다 —
           // 빼먹으면 행이 조용히 사라진다.
-          `${section.index + 1}. ${title(section.label)} ${section.repeat}`,
+          `${section.index + 1}. ${titleCase(section.label)} ${section.repeat}`,
           section.bars ? `${section.bars[0] + 1}–${section.bars[1]}` : "—",
           section.bars ? `${section.bars[1] - section.bars[0]}마디` : "—",
           `${clock(section.time[0])}–${clock(section.time[1])}`,

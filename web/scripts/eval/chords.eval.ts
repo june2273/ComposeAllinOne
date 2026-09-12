@@ -24,6 +24,7 @@ import { join } from "node:path";
 import { expect, test } from "vitest";
 
 import { ANALYSIS_RATE, analyzeAudio, type AnalysisReport } from "../../src/core/analysis";
+import { gridForOrNull } from "./truth";
 import { loadMono } from "./wav";
 
 const CACHE = process.env.EVAL_CACHE ?? "../server/cache";
@@ -88,10 +89,17 @@ function diatonicShare(report: AnalysisReport): number {
 const found = slots();
 test.skipIf(found.length === 0)("실곡의 코드 열", () => {
   for (const slot of found) {
+    // **격자가 없는 슬롯은 건너뛴다.** 여기는 `songs.json`이 아니라 캐시를
+    // 훑으므로 평가셋에서 일부러 뺀 곡(변박·변속)까지 들어온다.
+    const grid = gridForOrNull(slot);
+    if (!grid) {
+      console.log(`=== ${slot} — 건너뜀 (격자 없음)`);
+      continue;
+    }
     const path = join(CACHE, slot, "input.wav");
     const samples = loadMono(path);
     const started = Date.now();
-    const report = analyzeAudio(samples, ANALYSIS_RATE);
+    const report = analyzeAudio(samples, grid, ANALYSIS_RATE);
     const elapsed = (Date.now() - started) / 1000;
 
     const counts = new Map<string, number>();

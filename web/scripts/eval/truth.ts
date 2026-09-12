@@ -9,10 +9,21 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { relatedTempo } from "../../src/core/analysis/tempo";
+import { relatedTempo, type BeatGrid } from "../../src/core/analysis";
 
 export const CACHE = process.env.EVAL_CACHE ?? "../server/cache";
 export const EVALSET = process.env.EVAL_SET ?? "../evalset";
+/**
+ * 비트 격자를 떨궈 둔 폴더. **하니스를 돌리기 전에 먼저 만들어야 한다:**
+ *
+ * ```bash
+ * cd server && .venv/bin/python scripts/beatthis_bpm.py --beats-dir /tmp/btbeats
+ * ```
+ *
+ * 2026-09-12부터 `analyzeAudio`가 격자를 인자로 받는다 — 자기상관 경로를 지웠고
+ * 하니스에는 사이드카를 부를 자리가 없다(브라우저도 서버도 아니다).
+ */
+export const BEATS = process.env.EVAL_BEATS ?? "/tmp/btbeats";
 
 /** 정답과 이만큼 안에 들면 맞은 것으로 본다. MIREX 관례가 4%다 */
 export const TOLERANCE = 0.04;
@@ -96,4 +107,24 @@ export function ratioName(ours: number, truth: number): string {
     if (Math.abs(ratio / value - 1) < TOLERANCE) return name;
   }
   return relatedTempo(ours, truth, TOLERANCE) ? "배수(기타)" : "틀림";
+}
+
+/**
+ * 이 슬롯의 비트 격자. 없으면 던진다 — **조용히 빈 격자로 돌면 모든 하니스가
+ * "비트 0개"라는 뜻 없는 숫자를 낸다.**
+ */
+export function gridForOrNull(slot: string): BeatGrid | null {
+  const path = join(BEATS, `${slot}.json`);
+  return existsSync(path) ? (JSON.parse(readFileSync(path, "utf-8")) as BeatGrid) : null;
+}
+
+export function gridFor(slot: string): BeatGrid {
+  const path = join(BEATS, `${slot}.json`);
+  if (!existsSync(path)) {
+    throw new Error(
+      `${path}에 격자가 없다. 먼저 돌릴 것:\n` +
+        `  cd server && .venv/bin/python scripts/beatthis_bpm.py --beats-dir ${BEATS}`,
+    );
+  }
+  return JSON.parse(readFileSync(path, "utf-8")) as BeatGrid;
 }

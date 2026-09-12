@@ -7,7 +7,7 @@
 라이선스 정보는 추측하지 않고 설치된 패키지 메타데이터와 배포처 원문에서 직접
 확인한 값이다. 확인 방법과 날짜는 각 항목의 "확인" 줄에 적었다.
 
-최종 갱신: 2026-08-11 (멜로디 f0를 basic-pitch → RMVPE로 교체)
+최종 갱신: 2026-09-12 (템포·박자를 자기상관 → Beat This!로 교체)
 
 ---
 
@@ -136,7 +136,7 @@ https://github.com/rism-digital/verovio/tree/develop/fonts
 | [React](https://react.dev) | 19.2 | MIT | Meta 및 기여자 | `web/src/ui/` — 전체 UI |
 | [Vite](https://vite.dev) | 8.2 | MIT | Evan You 및 기여자 | 개발 서버·번들러 |
 | [TypeScript](https://www.typescriptlang.org) | 6.0 | Apache-2.0 | Microsoft | 전체 |
-| [verovio](https://www.verovio.org) (npm) | 6.2 | **LGPL-3.0** | RISM Digital Switzerland | `web/src/core/score.ts` — 악보 |
+| [verovio](https://www.verovio.org) (npm) | 6.2 | **LGPL-3.0** | RISM Digital Switzerland | `web/src/core/score.ts` — 악보 SVG · 재생 타임맵 · 인쇄용 쪽 |
 | [Vitest](https://vitest.dev) | 4.1 | MIT | Vitest 팀 | 테스트 |
 | [Testing Library](https://testing-library.com) | — | MIT | Kent C. Dodds 및 기여자 | UI 테스트 |
 | [oxlint](https://oxc.rs) | 1.x | MIT | Boshen 및 기여자 | 린트 (Vite 템플릿 기본) |
@@ -144,6 +144,19 @@ https://github.com/rism-digital/verovio/tree/develop/fonts
 **verovio npm판은 Python판과 같은 프로젝트·같은 라이선스(LGPL-3.0)이고, 동봉한
 SMuFL 악보 폰트 5종의 라이선스가 미확인인 것도 동일하다.** 위 verovio 항목의
 주의사항이 그대로 적용된다.
+
+**2026-08-28에 verovio에서 쓰는 API가 늘었다** — `renderToTimemap()`(재생 커서용
+음표 id ↔ 시각 표)과 `getPageCount()` + 쪽별 `renderToSVG(n)`(인쇄용 A4 여러 쪽).
+**새 의존성도 새 라이선스도 없다** — 이미 번들에 들어 있는 같은 툴킷의 다른
+메서드일 뿐이다. `renderToPDF`는 verovio의 C++ CLI에만 있고 WASM 툴킷에는 없어서
+(패키지 전체 grep으로 확인), PDF 만들기는 라이브러리 없이 **브라우저 인쇄**로
+간다(`web/src/platform/print.ts`).
+
+> **그런데 폰트 미확인 건이 이것으로 한 칸 무거워졌다.** 지금까지 글리프
+> 외곽선은 화면 SVG에만 실려 나갔는데, 이제 **사용자가 저장하는 PDF 파일에
+> 그대로 들어간다.** 인쇄는 사용자 로컬에서 일어나므로 우리가 그 파일을
+> 배포하는 것은 아니지만, 앱을 배포하면 "그 폰트 모양을 담은 PDF를 만들어 주는
+> 도구"를 배포하는 셈이 된다. 배포 전 확인 항목은 그대로이고 **범위만 넓어졌다.**
 
 ### 빌드 타임 도구 (배포물에 포함되지 않음)
 
@@ -228,11 +241,47 @@ verovio는 **웹 번들에 통째로 들어간다**(`dist/assets/verovio-module-
 
 | 패키지 | 버전 | 코드 라이선스 | 가중치 | 활용처 |
 |---|---|---|---|---|
+| [beat-this](https://github.com/CPJKU/beat_this) | 1.1.0 | **MIT** (`dist-info/licenses/LICENSE` 원문: "Copyright (c) 2024 Institute of Computational Perception, JKU Linz, Austria" + MIT 전문) | 아래 참조 — **이번에도 미확인이 아니다** | `app/beats.py` — 비트·다운비트. **템포·박자의 유일한 출처다** |
 | [demucs](https://github.com/adefossez/demucs) | 4.1.0 | **MIT** (`dist-info/licenses/LICENSE` 원문 확인) | 아래 참조 | `app/stems.py` — htdemucs 4스템 분리 |
 | [rmvpe-onnx](https://github.com/NewComer00/rmvpe-onnx) | 0.2.3 | **MIT** (`dist-info/licenses/LICENSE` 원문: "Copyright (c) 2026 NewComer00" + MIT 전문) | 아래 참조 (별도 다운로드) | `app/melody.py` — 보컬 f0 커브 |
 | [allin1](https://github.com/mir-aidj/all-in-one) | 1.1.0 | **MIT** (`dist-info/licenses/LICENSE` 원문: "Copyright (c) 2023 Taejun Kim" + MIT 전문) | 아래 참조 | `app/structure.py` — 구간(intro/verse/chorus…)·비트·다운비트 |
 | [torch](https://pytorch.org/) | 2.13.0 | Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND MIT | — | demucs가 쓴다. Apple Silicon에서 MPS 가속 |
 | [onnxruntime](https://onnxruntime.ai/) | 1.28.0 | MIT | — | rmvpe-onnx의 추론 백엔드 |
+
+**Beat This! (비트·다운비트) — 2026-09-12에 들어왔고, 브라우저의 자기상관
+경로를 대체했다**
+
+Foscarin, Schlüter & Widmer, "Beat this! Accurate beat tracking without DBN
+postprocessing", ISMIR 2024 ([arXiv 2407.21658](https://arxiv.org/abs/2407.21658)).
+CPJKU(요하네스 케플러 대학 린츠 계산지각연구소)가 냈다.
+
+**가중치도 MIT다 — 이번에도 미확인이 아니다.** 저장소 README가 코드와 가중치를
+**함께** 명시한다: *"The code and the published model weights are released under
+the MIT license."*
+([GitHub raw README](https://raw.githubusercontent.com/CPJKU/beat_this/main/README.md)를
+직접 읽어 확인, 2026-09-11). htdemucs·RMVPE가 "코드만 MIT이고 가중치 문서는 못
+봤다"인 것과 갈리는 지점이고, All-In-One 체크포인트를 HF API로 확인한 것과 같은 급이다.
+
+다만 **학습 데이터의 사슬은 여기서 끊긴다.** 같은 README가 스스로 밝힌다:
+*"Note that some of the training files are fully copyrighted or under limited
+Creative Commons licenses, and it is up to the user to assess whether this may
+impact their use case."* 학습은 18개 데이터셋 4,556곡이다. allin1의 Harmonix Set
+항목과 같은 종류의 단서라 같은 자리에 적어 둔다.
+
+**체크포인트는 패키지에 동봉되지 않는다** — `final0`(77MB)을 첫 사용 때 JKU
+클라우드에서 받아 `~/.cache/torch/hub/checkpoints/`에 둔다. RMVPE 가중치가
+362MB를 따로 받는 것과 같은 구조라, 기동 자가진단이 **import까지만** 본다
+(`app/beats.py`의 `selftest` — 진단하겠다고 77MB를 받으면 안 된다).
+
+| 딸려 오는 것 | 버전 | 라이선스 | 메모 |
+|---|---|---|---|
+| [rotary-embedding-torch](https://github.com/lucidrains/rotary-embedding-torch) | 0.9.1 | **MIT** (`dist-info` METADATA의 `License: MIT` + `Classifier: License :: OSI Approved :: MIT License`, 저작자 Phil Wang) | 트랜스포머의 회전 위치 임베딩. **새로 늘어난 의존성은 이것 하나다** — torch·einops·soxr·numpy는 이미 있었다 |
+
+> **왜 갈아탔는지는 라이선스와 무관하다.** 자기상관은 배수에 대해 자기닮음이라
+> 템포 배수 오류를 원리적으로 못 가른다. 규칙으로 고치려는 시도가 여덟 번 죽은
+> 뒤 이걸 정답 14곡에 재서 **14/14**(우리 11/14 · allin1 10/14)가 나왔고,
+> 전사도 여섯 곡 전부에서 좋아졌다(정확 841 → 1345음). 자세한 것은
+> `docs/템포_배수오류_미해결.md` §3-3.
 
 **All-In-One (곡 구조) — 2026-08-12에 들어왔다**
 
@@ -398,7 +447,7 @@ FFT까지 직접 짰다. 따라서 여기에 걸리는 라이선스는 없지만
 | SuperFlux 온셋 검출 (로그주파수 필터뱅크 + 주파수축 max-filter + 지연 차분) | Böck & Widmer, "Maximum Filter Vibrato Suppression for Onset Detection", DAFx 2013 | `analysis/features.ts` |
 | 온셋 봉우리 고르기 (국소 최대 + 문턱 + 불응기) | Böck, Krebs & Schedl, "Evaluating the Online Capabilities of Onset Detection Methods", ISMIR 2012 (§2.3의 peak-picking) | `transcribe/notes.ts` `pickOnsets` |
 | 자기상관 × 로그정규 템포 prior | Klapuri et al. 계열. 강의 08(음악 정보학, GCT731)이 정리한 형태를 따랐다 | `analysis/tempo.ts` `estimateTempo` |
-| 동적 계획법 비트 추적 (`D(t)=onset(t)+max{D(τ)−λ·log²(Δ/T)}`) | Ellis, "Beat Tracking by Dynamic Programming", J. New Music Research 36(1), 2007 | `analysis/tempo.ts` `trackBeats` |
+| 동적 계획법 비트 추적 (`D(t)=onset(t)+max{D(τ)−λ·log²(Δ/T)}`) | Ellis, "Beat Tracking by Dynamic Programming", J. New Music Research 36(1), 2007 | ~~`analysis/tempo.ts` `trackBeats`~~ **2026-09-12에 제거** — 비트를 Beat This!가 낸다(위 2-2절). 자기상관 템포 추정과 배수 교정 규칙이 함께 빠졌다 |
 | Krumhansl–Schmuckler 조성 판정 (크로마 × 프로파일 상관) | Krumhansl, *Cognitive Foundations of Musical Pitch*, 1990 (프로파일은 Krumhansl & Kessler 1982) | `analysis/key.ts` |
 | Temperley 조성 프로파일 | Temperley, *The Cognition of Basic Musical Structures*, MIT Press 2001 (Kostka-Payne 코퍼스 기반) | `analysis/key.ts` `TEMPERLEY` |
 | 크로마 = 옥타브 등가성으로 접기 | 강의 03(음악 정보학) · Bartsch & Wakefield, WASPAA 2001 | `analysis/features.ts` |
@@ -470,6 +519,24 @@ FFT까지 직접 짰다. 따라서 여기에 걸리는 라이선스는 없지만
 가로가 초·세로가 반음이라 수직거리에 뜻이 없다. 지키려는 양이 "그 시각의 음높이가
 얼마나 틀리는가"이므로 **같은 시각의 세로 오차(센트)**로 바꿔 썼다. 코드는 옮기지
 않았고 반복 절차만 따랐다(재귀 대신 명시적 스택).
+
+### 드럼 (2026-09-04 추가)
+
+**새 라이브러리도 새 모델도 없다.** 온셋은 이미 있던 SuperFlux ODF(위 표)를 그대로
+쓰고, 분류는 대역 에너지 규칙이며, 반복 압축은 사양서 §10의 알고리즘을 코드 심볼
+대신 마디 심볼에 적용한 것이다. 그래서 **배포물이 한 바이트도 안 늘었다.**
+
+| 무엇 | 출처 | 우리 코드 |
+|---|---|---|
+| **GM 드럼맵**(채널 10, 번호 35~81) — 번호와 악기 이름의 대응 | MIDI Manufacturers Association, *General MIDI System Level 1* — [midi.org/gm-level-1-sound-set](https://midi.org/gm-level-1-sound-set) (규격 문서. 표를 보고 옮겨 적었고 코드·데이터 파일은 가져오지 않았다) | `core/drums/gm.ts` |
+| 드럼 온셋은 "Hard" 유형이라 단순 spectral flux로 충분하다는 판단 | 사양서 `PIPELINE_SPEC.md` §4[2] | `core/drums/detect.ts` |
+| **반복 압축** — 마디 단위 심볼 열 → 주기 탐색 → 편집 거리 클러스터링 → `A / A′ / A″` | 사양서 `PIPELINE_SPEC.md` §10. 계보는 COSIATEC / SIATECCompress (Meredith), MIREX "Discovery of Repeated Themes and Sections" | `core/drums/pattern.ts` |
+| 드럼 기보의 오선 자리·머리표 관례(킥 F4, 스네어 C5, 하이햇 G5 x머리표 …) | 관례. 특정 저작물을 옮긴 것이 아니라 널리 쓰이는 배치를 적었다 | `core/drums/gm.ts`의 `step`/`octave`/`head` |
+
+**오선 자리는 verovio에 직접 재서 확인했다** — 번들에 GM 번호 → 자리 매핑이 없어서
+(`score-instrument`·`midi-unpitched` 처리기가 없다) 우리가 정해야 했고, `<unpitched>`가
+`<pitch>`와 같은 자리에 앉는다는 것을 렌더해서 확인했다. 측정 결과는
+`core/drums/notation.ts` 앞머리에 있다.
 
 ### CFP — 참조 구현을 읽었다는 것을 밝혀 둔다
 

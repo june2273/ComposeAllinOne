@@ -655,16 +655,6 @@ code {
   border: 2px solid var(--color-accent);
 }
 
-/* 성질 칸은 숫자가 아니라 글자가 들어간다 */
-.field--text {
-  width: auto;
-  min-width: 76px;
-  padding: 0 var(--space-3);
-  font-size: var(--text-lg);
-}
-.field--empty {
-  color: var(--color-text-muted);
-}
 
 /*
  * 선택지 + 그 아래 자판 안내를 한 덩어리로 묶는다.
@@ -676,6 +666,34 @@ code {
   flex-direction: column;
   align-items: center;
   gap: var(--space-3);
+}
+
+/* 음정 이름을 글자로 받는 칸. 답이 "증5" 한 덩어리라 칸도 하나다 */
+.textfield {
+  width: min(220px, 100%);
+  height: 56px;
+  padding: 0 var(--space-3);
+  text-align: center;
+  font: inherit;
+  font-size: var(--text-xl);
+  font-weight: 700;
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: 2px solid var(--color-accent);
+  border-radius: var(--radius-sm);
+}
+.textfield:disabled {
+  border-color: var(--color-border);
+  color: var(--color-text-muted);
+}
+.textfield::placeholder {
+  color: var(--color-text-muted);
+  font-weight: 400;
+}
+.textfield__hint {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  text-align: center;
 }
 
 .choices {
@@ -1110,4 +1128,351 @@ code {
   margin-top: var(--space-1);
   font-size: var(--text-sm);
   color: var(--color-text-muted);
+}
+/*
+ * 진단 한 줄. `--color-timeout`을 쓰는 것은 `.metric__note`와 같은 뜻의 색이기
+ * 때문이다 — 새 토큰을 만들면 "주의"를 뜻하는 색이 두 개가 된다.
+ * **색만으로 알리지 않는다** — 왼쪽 굵은 선과 문장 자체가 함께 나간다.
+ */
+.metric__warning {
+  margin: var(--space-2) 0 0;
+  padding: var(--space-2);
+  border-left: 3px solid var(--color-timeout);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-timeout) 12%, transparent);
+  font-size: var(--text-sm);
+  color: var(--color-text);
+}
+
+/* --- 가상 피아노 (ds.Keyboard / ds.Stepper) --- */
+/*
+ * 건반은 **흰건반도 검은건반도 절대 배치**다. 흰건반을 flex로 늘어놓고 검은건반만
+ * 얹는 방법도 있지만, 그러면 검은건반의 `left`를 계산할 때 흰건반의 실제 폭을
+ * 알아야 한다 — 둘 다 `%`로 두면 컴포넌트가 개수만으로 자리를 정할 수 있다.
+ *
+ * `touch-action: none`이 없으면 터치로 누를 때 브라우저가 스크롤로 가로채서
+ * pointerdown 다음이 pointercancel이 된다(음이 나자마자 꺼진다).
+ */
+.piano {
+  position: relative;
+  width: 100%;
+  height: 200px;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  border-radius: var(--radius-md);
+  /* 건반 위쪽을 덮는 띠 — 이게 없으면 검은건반이 허공에서 시작한 것처럼 보인다 */
+  border-top: 10px solid var(--color-border-strong);
+  background: var(--color-border-strong);
+}
+.pianokey {
+  position: absolute;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+  padding-bottom: var(--space-2);
+  font-family: var(--font-sans);
+  cursor: pointer;
+  transition: background var(--transition), box-shadow var(--transition);
+}
+.pianokey--white {
+  height: 100%;
+  background: light-dark(#ffffff, #d7dade);
+  color: light-dark(#4b515a, #2a2e34);
+  border: 1px solid var(--color-border-strong);
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+  z-index: 1;
+}
+.pianokey--black {
+  height: 62%;
+  background: light-dark(#2b2f36, #0c0e11);
+  color: light-dark(#c9ced6, #9aa3af);
+  border: 1px solid light-dark(#15181c, #000000);
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+  box-shadow: 0 2px 4px rgb(0 0 0 / 0.35);
+  z-index: 2;
+}
+/* 눌린 건반은 색으로만 알리지 않는다 — 그림자를 지워 실제로 눌린 것처럼 보인다 */
+.pianokey--on.pianokey--white {
+  background: var(--color-accent-soft);
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+.pianokey--on.pianokey--black {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: var(--color-accent-text);
+  box-shadow: none;
+}
+.pianokey__label {
+  font-size: var(--text-sm);
+  font-weight: 700;
+}
+.pianokey__caption {
+  font-size: var(--text-xs);
+  opacity: 0.75;
+}
+/* 검은건반은 좁아서 음이름까지 넣으면 겹친다 */
+.pianokey--black .pianokey__caption {
+  display: none;
+}
+
+/* 지금 울리는 음. **자리를 늘 차지한다** — 비었을 때 줄이 사라지면 아래가 들썩인다 */
+.freeplay__sounding {
+  min-height: 1.5em;
+  margin: 0;
+  text-align: center;
+  font-family: var(--font-mono);
+  color: var(--color-text-muted);
+}
+.freeplay__controls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: var(--space-4);
+}
+.freeplay__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+/*
+ * 자판 안내를 라벨 **바로 옆**에 붙인다. `space-between`으로 양 끝에 밀면
+ * 칸이 둘 나란히 설 때 오른쪽 안내가 옆 칸 라벨에 붙어 보인다(실측).
+ */
+.stepper__head {
+  display: flex;
+  justify-content: flex-start;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+.stepper__label {
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+.stepper__keys {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+}
+/* 폭 상한이 없으면 값이 저 멀리 가운데에 놓여 −/+와 눈으로 잇기 어렵다
+   (`ds.ShareBars`의 막대 폭에 상한을 둔 것과 같은 이유) */
+.stepper__row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  max-width: 200px;
+}
+.stepper__button {
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  font-size: var(--text-lg);
+  line-height: 1;
+  color: var(--color-text);
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.stepper__button:hover:not(:disabled) {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+.stepper__button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.stepper__value {
+  flex: 1 1 auto;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+.stepper__hint {
+  margin: var(--space-1) 0 0;
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+}
+
+/* --- 문항형의 가상 건반 --- */
+/*
+ * MIDI가 없으면 여기가 유일한 답 입력 수단이다(`MidiStage`는 아무것도 안 그린다).
+ * 자유 연주와 달리 **폭에 상한을 둔다** — 한 옥타브(흰건반 8개)를 화면 폭에 다
+ * 펴면 건반 하나가 손바닥만 해져서 악기로 안 보인다.
+ */
+.quiz__keyboard {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+}
+.quiz__keyboard .piano {
+  max-width: 420px;
+  height: 160px;
+}
+/* 눌린 순간 불이 들어온다. 문항형은 누른 상태를 들고 있지 않으므로(게이트가
+   `Session.phase` 하나여야 한다) CSS가 대신한다 */
+.pianokey:active {
+  filter: brightness(0.92);
+}
+.pianokey--white:active {
+  background: var(--color-accent-soft);
+  border-color: var(--color-accent);
+}
+
+/* --- 악보 재생 커서 --- */
+/* 지금 울리는 음표. id는 verovio가 붙이고 ds.StaffFigure가 클래스를 건다.
+   presentation attribute(fill="…")보다 CSS 규칙이 세므로 클래스 하나로 이긴다.
+   **stroke는 건드리지 않는다** — 기본값이 none이라 색을 주는 순간 없던 외곽선이
+   그려져 음표가 굵어진다. */
+.staff__on,
+.staff__on * {
+  color: var(--color-accent);
+  fill: var(--color-accent);
+}
+
+/* --- 악보 재생기 (분석 콘솔) --- */
+.player {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.player__controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+.player__time {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- PDF 악보 뷰어 --- */
+.pdfview {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.pdfview__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+.pdfview__name {
+  font-weight: 600;
+}
+/* 악보는 세로로 길다. 화면 대부분을 주되 머리줄이 밀려나지 않을 만큼만 남긴다. */
+.pdfview__frame {
+  width: 100%;
+  height: 75vh;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-raised);
+}
+
+/* --- 스텝 그리드 (ds.StepGrid) --- */
+/*
+ * 시퀀서식 격자. **클래스 이름을 짓기 전에 grep했다** — `.grid`·`.cell`·`.step`은
+ * 이 파일에서 이미 쓰이거나 너무 흔해서 `.picker` 때와 같은 충돌이 난다.
+ *
+ * `.matrix`와 같은 함정이 여기에도 있다: 빈 칸 색을 `td`가 깔고 있으므로 값이
+ * 든 칸의 선택자를 **같은 길이로 맞춰야** 이긴다.
+ */
+.stepgrid {
+  max-width: 100%;
+}
+.stepgrid__caption {
+  margin: 0 0 var(--space-2);
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+.stepgrid__scroll {
+  /* 64칸까지 간다. 접거나 줄바꿈하면 격자로서의 값이 사라진다 */
+  overflow-x: auto;
+  max-width: 100%;
+  padding: var(--space-3);
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+.stepgrid__table {
+  border-collapse: collapse;
+  font-size: var(--text-xs);
+}
+.stepgrid__label {
+  /* 가로로 밀어도 행 이름은 붙어 있어야 무슨 줄인지 안다 */
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  padding: 0 var(--space-3) 0 0;
+  text-align: right;
+  white-space: nowrap;
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+  font-weight: 600;
+}
+.stepgrid__head {
+  padding: 0 0 var(--space-1);
+  color: var(--color-text-muted);
+  font-weight: 500;
+  font-size: var(--text-xs);
+  min-width: 1.35em;
+}
+.stepgrid__head--beat {
+  color: var(--color-text);
+  font-weight: 700;
+}
+.stepgrid__table td.stepgrid__cell {
+  width: 1.35em;
+  height: 1.35em;
+  padding: 0;
+  text-align: center;
+  line-height: 1.35em;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: transparent;
+}
+.stepgrid__table td.stepgrid__cell--beat {
+  /* 박이 어디인지는 마디선이 아니라 이 줄이 보여준다 */
+  border-left: 2px solid var(--color-border-strong);
+}
+.stepgrid__table td.stepgrid__cell--on {
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
+  font-weight: 700;
+}
+.stepgrid__table td.stepgrid__cell--cursor {
+  /* 커서는 배경이 아니라 테두리다 — 값이 든 칸의 색을 덮으면 안 된다 */
+  outline: 2px solid var(--color-accent);
+  outline-offset: -2px;
+}
+
+/* --- 드럼 칸 --- */
+/*
+ * 루프를 고르는 단추 줄. **`.picker`를 쓰지 않는다** — 그 이름은 분석 콘솔의
+ * 파일 드롭 영역이 이미 갖고 있어서 점선 테두리가 딸려 온다(실측).
+ */
+.drums__loops {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.stepgrid__head--bar {
+  color: var(--color-accent);
+}
+.stepgrid__table td.stepgrid__cell--bar {
+  /* 마디선. 박선(1px)보다 굵어야 두 단계가 눈에 갈린다 */
+  border-left: 3px solid var(--color-text-muted);
 }

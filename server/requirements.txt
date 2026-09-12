@@ -23,6 +23,10 @@ soundfile
 
 # --- 모델. 없어도 서버는 뜨고 /health가 false를 돌려준다 ---
 # 설치 순서에 유의: torch를 먼저 깔고 나머지를 붙이는 편이 해석이 빠르다.
+# 비트·다운비트 — **템포·박자의 유일한 출처**(2026-09-12에 브라우저의 자기상관
+# 경로를 지우고 이걸로 갈아탔다). PyPI에 없어서 저장소에서 직접 받는다.
+# 가중치 77MB(`final0`)는 첫 사용 때 JKU 클라우드에서 받는다.
+beat-this @ https://github.com/CPJKU/beat_this/archive/main.zip
 demucs                    # 스템 분리 (htdemucs)
 rmvpe-onnx                # 멜로디 f0. 가중치 362MB는 첫 사용 때 따로 받는다
 

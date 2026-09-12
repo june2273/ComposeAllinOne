@@ -14,12 +14,14 @@ import { NullSynth } from "../src/core/audio";
 import { DIATONIC_INTERVALS, INTERMEDIATE } from "../src/core/config";
 import type { Result } from "../src/core/session";
 import {
+  type MidiEnv,
   WebMidiInput,
   parseNoteMessage,
   rankPort,
   usablePort,
 } from "../src/platform/midi";
 import { QuizPage } from "../src/ui/pages";
+import { SettingsDialog } from "../src/ui/settings";
 
 vi.mock("../src/core/score", () => ({
   ScoreRenderer: { load: () => Promise.reject(new Error("jsdom")) },
@@ -355,6 +357,111 @@ describe("QuizPage 결선", () => {
     expect(screen.queryByText("MIDI")).toBeNull();
   });
 
+  /**
+   * **MIDI가 없으면 화면에 답할 방법이 하나도 없다** — `MidiStage`가 아무것도
+   * 그리지 않고 자판 폴백은 아는 사람만 안다. 그래서 가상 건반이 기본으로 펴진다.
+   */
+  describe("가상 건반", () => {
+    async function mount(env: MidiEnv) {
+      const finished: Result[][] = [];
+      await act(async () => {
+        render(
+          <QuizPage
+            config={INTERMEDIATE}
+            audio={audio}
+            onFinished={(r) => finished.push(r)}
+            midiEnv={env}
+          />,
+        );
+      });
+      return finished;
+    }
+
+    /** 화면에 그려진 건반 수. 0이면 접혀 있다 */
+    function keyCount() {
+      return document.querySelectorAll(".pianokey").length;
+    }
+
+    test("MIDI가 없으면 펴진다", async () => {
+      // Web MIDI 자체가 없는 브라우저(Safari·Firefox)
+      await mount({ requestAccess: undefined });
+      expect(keyCount()).toBe(13); // C4~C5
+    });
+
+    test("건반이 붙어 있으면 접힌다 — 진짜 건반이 있는데 자리를 뺏지 않는다", async () => {
+      await mount(envFor(new FakeAccess(KEYLAB)));
+      expect(keyCount()).toBe(0);
+      expect(screen.getByText("가상 건반 펴기")).toBeTruthy();
+    });
+
+    test("쓸 만한 포트가 하나도 없으면 펴진다", async () => {
+      // MCU/HUI만 꽂힌 상황. 권한은 있지만 칠 수 있는 건반은 없다.
+      await mount(envFor(new FakeAccess(["X MCU/HUI"])));
+      expect(keyCount()).toBe(13);
+    });
+
+    test("한 번 접으면 그대로 접혀 있다 — 사용자의 선택이 이긴다", async () => {
+      await mount({ requestAccess: undefined });
+      await act(async () => {
+        screen.getByText("가상 건반 접기").click();
+      });
+      expect(keyCount()).toBe(0);
+    });
+
+    test("건반을 누르면 채점된다 — 자판·MIDI와 같은 경로", async () => {
+      await mount({ requestAccess: undefined });
+      await act(async () => {
+        vi.advanceTimersByTime(250);
+      });
+      await act(async () => {
+        const key = [...document.querySelectorAll(".pianokey")].find((b) =>
+          b.textContent?.startsWith("C4"),
+        )!;
+        key.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+      });
+      const judged =
+        screen.queryByText("정답") !== null || screen.queryByText("오답") !== null;
+      expect(judged).toBe(true);
+    });
+
+    test("락아웃 중에는 화면 건반도 버려진다 — 게이트는 하나뿐이다", async () => {
+      await mount({ requestAccess: undefined });
+      await act(async () => {
+        for (const key of document.querySelectorAll(".pianokey")) {
+          key.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+        }
+      });
+      expect(screen.queryByText("정답")).toBeNull();
+      expect(screen.queryByText("오답")).toBeNull();
+    });
+
+    test("음정 스테이지에는 나오지 않는다 — 숫자·성질로 답한다", async () => {
+      await act(async () => {
+        render(
+          <QuizPage
+            config={DIATONIC_INTERVALS}
+            audio={audio}
+            onFinished={() => {}}
+            midiEnv={{ requestAccess: undefined }}
+          />,
+        );
+      });
+      expect(keyCount()).toBe(0);
+    });
+
+    test("그려진 건반이 이 스테이지의 음역과 정확히 같다", async () => {
+      await mount({ requestAccess: undefined });
+      const labels = [...document.querySelectorAll(".pianokey__label")].map(
+        (n) => n.textContent,
+      );
+      expect(labels.at(0)).toBe("C4");
+      expect(labels.at(-1)).toBe("C5");
+      expect(labels).toHaveLength(
+        INTERMEDIATE.difficulty.noteHigh - INTERMEDIATE.difficulty.noteLow + 1,
+      );
+    });
+  });
+
   test("StrictMode 이중 마운트에서도 포트에 리스너가 하나만 붙는다", async () => {
     const access = new FakeAccess(["Test MIDI"]);
     const { unmount } = render(
@@ -375,5 +482,42 @@ describe("QuizPage 결선", () => {
 
     unmount();
     expect(access.port("Test MIDI").listeners).toBe(0);
+  });
+});
+
+// --- 설정 창 ------------------------------------------------------------------
+
+describe("설정 창의 MIDI 칸", () => {
+  async function open(env: MidiEnv) {
+    await act(async () => {
+      render(
+        <SettingsDialog
+          theme="light"
+          dark={false}
+          onTheme={() => {}}
+          onClose={() => {}}
+          midiEnv={env}
+        />,
+      );
+    });
+  }
+
+  test("듣는 포트와 무시한 포트를 각각 줄로 보여준다", async () => {
+    await open(envFor(new FakeAccess(KEYLAB)));
+
+    expect(screen.getByText("1개 듣는 중")).toBeTruthy();
+    expect(screen.getByText("KL Essential 61 mk3 MIDI")).toBeTruthy();
+    // **거른 포트가 어디에도 안 보이는 것이 원래 문제였다** — 건반을 꽂았는데
+    // 반응이 없을 때 왜인지 볼 자리가 여기다.
+    expect(screen.getByText("KL Essential 61 mk3 MCU/HUI")).toBeTruthy();
+    expect(screen.getAllByText("무시")).toHaveLength(3);
+  });
+
+  test("Web MIDI가 없으면 이유를 적고 다시 찾기를 감춘다", async () => {
+    await open({ requestAccess: undefined });
+
+    expect(screen.getByText(/Chrome/)).toBeTruthy();
+    expect(screen.queryByText("다시 찾기")).toBeNull();
+    expect(screen.queryByText("무시")).toBeNull();
   });
 });

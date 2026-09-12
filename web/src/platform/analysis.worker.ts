@@ -10,15 +10,28 @@
  * 오래 잡지 않는다. 워커가 받는 것은 이미 디코딩된 모노 샘플이다.
  */
 
-import { analyzeAudio, extractOnsetCurve } from "../core/analysis";
+import {
+  analyzeAudio,
+  extractOnsetCurve,
+  type AnalysisProgress,
+  type BeatGrid,
+} from "../core/analysis";
+import { detectDrums, type DetectOptions } from "../core/drums";
 
 interface Request {
   /** 없으면 `analyze` — 옛 메시지 모양과 호환된다 */
-  job?: "analyze" | "onset";
+  job?: "analyze" | "onset" | "drums";
   samples: Float32Array;
   sampleRate: number;
-  /** 사용자가 템포 후보를 직접 골랐을 때만 온다. `job: "analyze"`에서만 쓴다 */
-  forceBpm?: number;
+  /**
+   * 비트 격자. **`job: "analyze"`에서는 필수다** — 워커에는 네트워크가 없어서
+   * 사이드카를 직접 못 부른다. 메인 스레드가 받아 함께 넣는다.
+   */
+  grid?: BeatGrid;
+  /** 사용자가 배수 후보를 직접 골랐을 때만 온다(2 또는 0.5) */
+  ratio?: number;
+  /** `job: "drums"`에서만. 하니스가 문턱을 훑을 때 쓴다 */
+  drumOptions?: DetectOptions;
 }
 
 const scope = self as unknown as {
@@ -27,18 +40,28 @@ const scope = self as unknown as {
 };
 
 scope.onmessage = (event: MessageEvent) => {
-  const { job, samples, sampleRate, forceBpm } = event.data as Request;
+  const { job, samples, sampleRate, grid, ratio, drumOptions } = event.data as Request;
   try {
     if (job === "onset") {
       // 보컬 스템의 온셋. 전사의 노트 분할이 쓴다 — 진행률은 없다(수백 ms다)
       scope.postMessage({ type: "onset", curve: extractOnsetCurve(samples, sampleRate) });
       return;
     }
+    if (job === "drums") {
+      // 드럼 스템의 타점. **`bandFlux`·`bandEnergy`는 여기서 죽는다** — 4분 곡에
+      // 12MB가 넘어서 구조화 복제로 넘기면 그 자체가 비용이 된다. 밖으로 나가는
+      // 것은 타점 목록과 위생 지표뿐이다.
+      scope.postMessage({ type: "drums", drums: detectDrums(samples, sampleRate, drumOptions) });
+      return;
+    }
+    if (!grid) throw new Error("비트 격자가 없습니다 — 사이드카가 꺼져 있습니다");
     const report = analyzeAudio(
       samples,
+      grid,
       sampleRate,
-      (progress) => scope.postMessage({ type: "progress", ...progress }),
-      { forceBpm },
+      (progress: AnalysisProgress) =>
+        scope.postMessage({ type: "progress", ...progress }),
+      { ratio },
     );
     scope.postMessage({ type: "done", report });
   } catch (error) {

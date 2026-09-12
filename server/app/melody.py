@@ -255,14 +255,43 @@ def restore_octave_curve(lowered: dict) -> dict:
 
     모델에게 `rate // 2`를 주면 **오디오가 한 옥타브 내려가고 두 배 길어진다.**
     그래서 f0에 ×2, 프레임은 2칸마다 하나씩 집으면 원래 시간·음고로 돌아온다.
+
+    ## 음역을 여기서 다시 자른다 (실측 2026-08-19)
+
+    **`curve_from_prediction`의 `MIN_MIDI`~`MAX_MIDI` 자르기는 모델이 돈 도메인에서
+    일어난다.** 2패스는 내려간 도메인에서 잘리므로 그 상한(MIDI 96 = 2093Hz)이
+    여기서 ×2를 거쳐 **4186Hz = MIDI 108**이 된다 — 우리가 다룬다고 선언한 음역
+    밖이다.
+
+    그대로 내보내면 **웹이 그 프레임을 통째로 버린다**(`notes.ts`가
+    `midi > MAX_MIDI + 1`을 `continue`로 거른다). 즉 기준 패스가 맞히고 있던
+    고음이 2패스 때문에 **무성이 되어 사라진다** — 되올리려던 것과 정반대다.
+    실측: 기준이 MIDI 69로 멀쩡한 프레임에 도메인 상한짜리 2패스를 물리면
+    네 프레임 전부 MIDI 108로 바뀌고, 그 넷이 웹에서 사라진다.
+
+    **세 호출부가 전부 이 함수를 거치므로 여기서 한 번만 막는다** —
+    `resolve_octave_pass` · `resolve_high_register` · `octave_candidate`가
+    모두 `f0 > 0`을 이미 확인하고 있어서, 범위 밖을 0으로 두면 셋 다 자동으로
+    건너뛴다. 호출부마다 조건을 더하면 다음에 넷째가 생길 때 빠뜨린다.
     """
     f0 = np.asarray(lowered["f0"], dtype=np.float64) * 2.0
     confidence = np.asarray(lowered["confidence"], dtype=np.float64)
     keep = slice(0, len(f0) // 2 * 2, 2)
+    f0 = f0[keep]
+    confidence = confidence[: len(confidence) // 2 * 2 : 2]
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        midi = 69.0 + 12.0 * np.log2(np.where(f0 > 0, f0, np.nan) / 440.0)
+    # 범위 밖은 무성으로 — 신뢰도까지 함께 0으로 두어야 순위 계산
+    # (`_quantile_rank`)이 없는 값을 표본에 넣지 않는다
+    inside = np.nan_to_num(midi >= MIN_MIDI) & np.nan_to_num(midi <= MAX_MIDI)
+    f0 = np.where(inside, f0, 0.0)
+    confidence = np.where(inside, confidence, 0.0)
+
     return {
         "hopMs": lowered["hopMs"],
-        "f0": [round(float(v), 3) for v in f0[keep]],
-        "confidence": [round(float(v), 3) for v in confidence[: len(confidence) // 2 * 2 : 2]],
+        "f0": [round(float(v), 3) for v in f0],
+        "confidence": [round(float(v), 3) for v in confidence],
     }
 
 

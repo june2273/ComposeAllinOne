@@ -156,6 +156,34 @@ function answerOnly(question: Question): Judgement {
   return { correct: false, detail: `정답: ${question.answerText}` };
 }
 
+/** 임시표가 붙은 문제인가. 붙었으면 안내가 골격까지 짚어야 한다 */
+function isAltered(q: IntervalQuestion): boolean {
+  return q.lower.alter !== 0 || q.upper.alter !== 0;
+}
+
+/**
+ * 골격에서 사다리를 몇 칸 옮겨야 하는지 짚어 준다.
+ *
+ * 반음계 문제에서 "반음이 n개이므로 X음정입니다"는 **틀린 안내다** — 그 반음
+ * 개수가 가리키는 것은 임시표를 뗀 골격이기 때문이다(theory의
+ * `diatonicHalfSteps` 주석의 ②). ④까지 말해 줘야 답이 된다.
+ */
+function ladderHint(q: IntervalQuestion): string {
+  const shift = q.interval.semitones - q.skeleton.semitones;
+  const way = shift > 0 ? "넓히므로" : "좁히므로";
+  return (
+    `${q.interval.number}도에 반음 ${q.halfSteps}개면 골격이 ${q.skeleton.name}이고, ` +
+    `임시표가 ${Math.abs(shift)}칸 ${way} ${q.interval.name}입니다`
+  );
+}
+
+/** 성질이 틀렸을 때의 안내. 임시표 유무로 갈린다 */
+function qualityHint(q: IntervalQuestion): string {
+  return isAltered(q)
+    ? ladderHint(q)
+    : `${q.interval.number}도에 반음 ${q.halfSteps}개는 ${q.interval.quality}음정입니다`;
+}
+
 function missed(question: Question, played: StageResponse, hint: string): Judgement {
   return {
     correct: false,
@@ -184,7 +212,8 @@ export class IntervalCountGrader implements Grader {
       want,
       got,
       rightNumber
-        ? "도수는 맞습니다. 두 음 사이에 미–파와 시–도가 몇 번 나오는지 다시 세어 보세요"
+        ? "도수는 맞습니다. 임시표는 빼고, 두 음 사이에 미–파와 시–도가 몇 번 " +
+          "나오는지 다시 세어 보세요"
         : "도수부터 다시 — 아래 음을 1로 두고 줄·칸을 세어 보세요",
     );
   }
@@ -205,11 +234,7 @@ export class IntervalQualityGrader implements Grader {
     if (got.quality === want.interval.quality) {
       return { correct: true, detail: want.answerText };
     }
-    return missed(
-      want,
-      got,
-      `${want.interval.number}도에 반음 ${want.halfSteps}개는 ${want.interval.quality}음정입니다`,
-    );
+    return missed(want, got, qualityHint(want));
   }
 }
 
@@ -238,7 +263,7 @@ export class IntervalGrader implements Grader {
       want,
       got,
       rightNumber
-        ? `도수는 맞습니다. 반음이 ${want.halfSteps}개이므로 ${want.interval.quality}음정입니다`
+        ? `도수는 맞습니다. ${qualityHint(want)}`
         : "도수부터 다시 — 아래 음을 1로 두고 줄·칸을 세어 보세요",
     );
   }

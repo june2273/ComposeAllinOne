@@ -69,10 +69,13 @@ _DEVICE = "cpu"
 #: 진행률이 80%에 붙어 움직이지 않는다. 사용자에게는 멈춘 것과 구별되지 않는다
 #: (실측 2026-08-14: 그렇게 보여서 취소했다).
 #:
-#: **켜기 전에 먼저 할 일은 두 번째 htdemucs를 없애는 것이다.** 우리 스템을
-#: `demix_dir/htdemucs/<이름>/{bass,drums,other,vocals}.wav`로 심어 두면 allin1이
-#: 분리를 건너뛴다 — 다만 `stems.py`가 모노로 저장하므로 스테레오로 한 벌 더
-#: 남기거나 여기서 되살려야 한다. 그것이 이 지연의 절반이다.
+#: **어디가 느린지 실측했다**(2026-08-18, 14곡): htdemucs 분리 **51초(25%)** ·
+#: 스펙트로그램 1초 · **DiNAT 8폴드 추론 149초(74%)**. 곡당 211초다.
+#: 우리 스템을 `demix_dir/htdemucs/<이름>/{bass,drums,other,vocals}.wav`로 심으면
+#: 분리를 건너뛰지만(`stems.py`가 모노로 저장하므로 스테레오를 한 벌 더 남겨야
+#: 한다) **211초 → 160초에 그친다.** 큰 손잡이는 폴드 수다 — `harmonix-fold0`
+#: 하나면 78초이고, 정답 14곡에서 8폴드와 순이득이 0이었다(BPM이라는 대리
+#: 지표로 본 것이고, 정작 목적인 구간 경계·라벨은 정답이 0곡이라 못 쟀다).
 _ENABLED = os.environ.get("SIDECAR_STRUCTURE", "").lower() in ("1", "true", "yes", "on")
 
 Progress = Callable[[str, float], None]
@@ -142,6 +145,7 @@ def analyze(
     work_dir: Path,
     progress: Progress | None = None,
     model: str = MODEL,
+    keep_byproducts: bool = False,
 ) -> dict:
     """오디오 하나에서 구간·비트·다운비트를 뽑는다.
 
@@ -173,7 +177,12 @@ def analyze(
         device=_DEVICE,
         include_activations=False,
         include_embeddings=False,
-        keep_byproducts=False,
+        # **기본은 False다 — 파이프라인은 스템을 남기지 않는다.** 평가 하니스가
+        # 폴드를 바꿔 가며 잴 때만 True를 준다(`scripts/structure_bpm.py`).
+        # 남길 때는 **입력 파일 이름이 곡마다 달라야 한다** — allin1이 스템과
+        # 스펙트로그램을 `path.stem`으로 키잉해서, 우리 캐시처럼 전부
+        # `input.wav`면 두 번째 곡부터 첫 곡의 스템을 조용히 물려받는다.
+        keep_byproducts=keep_byproducts,
         multiprocess=False,
     )
     if progress:

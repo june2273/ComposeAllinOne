@@ -32,31 +32,31 @@
  * 곡 중간에 바뀌는 곡을 넣으면 우세한 쪽 하나가 나온다.
  */
 
-import { extractChordChroma, extractFeatures, normalizeOnset, ANALYSIS_RATE } from "./features";
+import { extractChordChroma, extractFeatures, ANALYSIS_RATE } from "./features";
 import { estimateChords, type ChordEstimate, type ChordEvent } from "./chords";
 import { estimateKey, keyFifths, type KeyEstimate } from "./key";
 import { estimateMeter, type MeterEstimate } from "./meter";
 import {
-  type BeatTrack,
-  estimateTempo,
-  HALF_BEAT_STRONG,
-  halfBeatStrength,
-  MAX_BPM,
-  resolveOctave,
+  bpmOf,
+  metricalFamily,
+  retimeBeats,
   type TempoCandidate,
-  type TempoEstimate,
-  trackBeats,
-} from "./tempo";
+} from "./beats";
 
 export {
   ANALYSIS_RATE,
   CHORD_FRAME_SIZE,
   CHORD_HOP_SIZE,
   extractChordChroma,
+  extractFeatures,
   extractOnsetCurve,
   FRAME_SIZE,
   HOP_SIZE,
+  normalizeOnset,
 } from "./features";
+export type { FeatureOptions, FrameFeatures } from "./features";
+export { bpmOf, MAX_BPM, MIN_BPM, metricalFamily, relatedTempo, retimeBeats } from "./beats";
+export type { TempoCandidate } from "./beats";
 export { chordTemplates, estimateChords, rootName } from "./chords";
 export type {
   ChordCandidate,
@@ -84,21 +84,40 @@ export interface AnalysisProgress {
   readonly ratio: number;
 }
 
+/**
+ * 밖에서 받은 비트 격자. **2026-09-12부터 이것이 필수 입력이다.**
+ *
+ * 예전에는 `analyzeAudio`가 자기상관으로 직접 만들었는데, 배수 오류를 원리적으로
+ * 못 가려서 사이드카의 Beat This!로 갈아탔다(`server/app/beats.py`).
+ * 워커에는 네트워크가 없으므로 **메인 스레드가 먼저 받아 함께 넣는다.**
+ */
+export interface BeatGrid {
+  readonly beats: readonly number[];
+  readonly downbeats: readonly number[];
+  readonly beatsPerBar: number;
+  /** 사이드카가 낸 BPM. 없으면 비트열에서 다시 뽑는다 */
+  readonly bpm?: number;
+}
+
 export interface AnalysisOptions {
   /**
-   * 자동 추정을 건너뛰고 이 BPM을 목표로 비트를 다시 추적한다.
+   * 격자를 이 배수로 갈아탄다 — **사용자가 후보를 눌렀을 때만.**
    *
-   * 사용자가 후보 중 하나를 직접 골랐을 때만 쓴다. 그때는 `resolveOctave`·
-   * `resolveDupleMeter`도 함께 건너뛴다 — 사용자가 이미 배수 모호성을
-   * 풀었는데 자동 보정이 그걸 다시 뒤집으면 안 된다.
+   * 2면 중점을 끼우고 0.5면 하나씩 건너뛴다(`retimeBeats`). 예전 `forceBpm`은
+   * 워커를 다시 돌려 DP부터 새로 했는데, 비트를 밖에서 받는 지금은 격자를
+   * 변환하면 끝이라 **모델을 다시 부를 이유가 없다.**
    */
-  readonly forceBpm?: number;
+  readonly ratio?: number;
 }
 
 export interface TempoResult {
   readonly bpm: number;
   readonly confidence: number;
-  /** 정수배 후보들. ×2·÷2가 남아 있으면 여기 보인다 */
+  /**
+   * 사람이 고를 수 있는 배수들(`metricalFamily`). **자기상관 봉우리가 아니다** —
+   * 모델이 답 하나를 주므로 분포가 없고, 대신 틀렸다면 거의 반드시 배수로
+   * 틀린다는 사실을 화면에 낸다.
+   */
   readonly candidates: readonly TempoCandidate[];
   /** 비트 간격의 고름 정도 0~1 */
   readonly steadiness: number;
@@ -132,6 +151,7 @@ export interface AnalysisReport {
  */
 export function analyzeAudio(
   samples: Float32Array,
+  grid: BeatGrid,
   sampleRate: number = ANALYSIS_RATE,
   onProgress?: (progress: AnalysisProgress) => void,
   options: AnalysisOptions = {},
@@ -140,80 +160,86 @@ export function analyzeAudio(
 
   report("스펙트럼 분석", 0);
   const features = extractFeatures(samples, sampleRate, (r) =>
-    report("스펙트럼 분석", r * 0.55),
+    report("스펙트럼 분석", r * 0.6),
   );
 
-  report("템포 추정", 0.6);
-  const onset = normalizeOnset(features.onset, features.fps);
-  const tempo = estimateTempo(onset, features.fps);
-  const forced = options.forceBpm;
+  // **격자 변환은 재분석이 아니다.** 사용자가 배수 후보를 누르면 여기서 비트를
+  // 촘촘하게 하거나 성기게 할 뿐이고, 모델은 다시 안 돈다.
+  const ratio = options.ratio ?? 1;
+  const retimed = ratio === 1
+    ? { beats: [...grid.beats], downbeats: [...grid.downbeats] }
+    : retimeBeats(grid.beats, grid.downbeats, ratio);
+  const beats = retimed.beats;
+  const downbeats = retimed.downbeats;
+  // 마디당 박은 격자를 갈아타도 그대로다 — 박이 잘아졌으면 마디도 그만큼
+  // 잘아진 것이 아니라 **한 마디에 든 박 수가 늘어난 것**이다.
+  const beatsPerBar = ratio === 1
+    ? grid.beatsPerBar
+    : Math.max(1, Math.round(grid.beatsPerBar * ratio));
+  // 사이드카가 준 BPM은 원래 격자의 것이라, 갈아탔으면 다시 뽑는다.
+  const bpm = ratio === 1 && grid.bpm ? grid.bpm : bpmOf(beats);
 
-  report("비트 추적", 0.7);
-  const target = forced ?? tempo.bpm;
-  let track = target > 0
-    ? trackBeats(onset, features.fps, target)
-    : { beats: [], bpm: 0, steadiness: 0 };
-  // **배수 점검.** 자기상관은 정수배를 원리적으로 못 가리므로 악센트 구조로
-  // 한 번 더 본다 — 이걸 안 하면 173BPM 곡이 87BPM으로 나가고, 박자·격자·
-  // 악보가 전부 그 위에 얹힌다(`resolveOctave`). 사용자가 후보를 직접
-  // 골랐다면(`forced`) 이미 배수 모호성을 풀었다는 뜻이므로 건너뛴다 —
-  // 안 그러면 자동 보정이 방금 고른 답을 도로 뒤집을 수 있다.
-  if (!forced) {
-    const faster = resolveOctave(onset, features.fps, tempo, track);
-    if (faster) track = faster;
-  }
+  report("박자 판정", 0.7);
+  const meter = estimateMeter(beats, features.fps, features.onset, {
+    beatsPerBar,
+    downbeats,
+  });
 
-  report("박자 판정", 0.78);
-  const measure = (beats: readonly number[]) =>
-    estimateMeter(beats, features.fps, features.onset, features.low, features.chroma);
-  let meter = measure(track.beats);
-  // **2/4가 나오면 템포가 절반이라고 본다**(`resolveDupleMeter`). 같은 이유로
-  // 사용자가 직접 고른 뒤에는 건너뛴다.
-  if (!forced) {
-    const duple = resolveDupleMeter(onset, features.fps, tempo, track, meter, measure);
-    if (duple) {
-      track = duple.track;
-      meter = duple.meter;
-    }
-  }
-
-  report("조성 판정", 0.82);
+  report("조성 판정", 0.78);
   const key = estimateKey(features.chroma);
 
   // **코드는 맨 뒤다.** 비트 그리드가 있어야 하고(사양서 §1.1 — 크로마를 먼저
   // 비트로 접는다), 근음을 ♯로 적을지 ♭로 적을지는 조성이 정한다. 조표는
   // **표기에만** 쓴다 — 판정에 넣으면 "조성은 코드 시퀀스 위에서 판정한다"는
   // 사양서 §7의 길이 순환으로 막힌다.
-  report("코드 인식", 0.85);
+  report("코드 인식", 0.82);
   const chords = recognizeChords(
     samples,
     sampleRate,
     features.tuningCents,
-    track.beats,
+    beats,
     { key, meter },
-    (r) => report("코드 인식", 0.85 + r * 0.14),
+    (r) => report("코드 인식", 0.82 + r * 0.17),
   );
   report("완료", 1);
 
   return {
     durationSec: samples.length / sampleRate,
     tempo: {
-      // 비트열에서 다시 뽑은 값이 1차다. 비트가 안 잡히면 추정값으로 물러난다.
-      bpm: track.bpm > 0 ? track.bpm : target,
-      // 사용자가 직접 골랐다면 더 이상 모호하지 않다 — 자기상관이 원래
-      // 후보를 얼마나 확신했는지는 이제 무의미하다.
-      confidence: forced ? 1 : tempo.confidence,
-      candidates: tempo.candidates,
-      steadiness: track.steadiness,
+      bpm,
+      // **모델의 답에는 자기상관 같은 후보 경쟁이 없다.** 대신 격자 자체가
+      // 얼마나 한결같은지를 신뢰도로 쓴다(`meter.confidence`와 같은 재료).
+      confidence: steadinessOf(beats),
+      candidates: metricalFamily(bpm),
+      steadiness: steadinessOf(beats),
     },
     meter,
     key,
     tuningCents: features.tuningCents,
-    beats: track.beats,
+    beats,
     downbeats: meter.downbeats,
     chords: chords.chords,
     chordConfidence: chords.confidence,
   };
+}
+
+/**
+ * 비트 간격이 얼마나 고른가 0~1. **예전 `trackBeats`가 함께 내던 값이다.**
+ *
+ * 격자를 밖에서 받게 되면서 계산할 자리가 없어졌는데, 화면이 "이 BPM을 얼마나
+ * 믿을지"를 이 숫자로 보이고 있어서 여기로 옮겼다. 중앙값 대비 상대 편차의
+ * 평균을 1에서 뺀 값이라, 완전히 일정하면 1이고 흔들릴수록 0에 가까워진다.
+ */
+function steadinessOf(beats: readonly number[]): number {
+  if (beats.length < 3) return 0;
+  const gaps: number[] = [];
+  for (let i = 1; i < beats.length; i += 1) gaps.push(beats[i] - beats[i - 1]);
+  const sorted = [...gaps].sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)];
+  if (!(median > 0)) return 0;
+  const spread =
+    gaps.reduce((sum, g) => sum + Math.abs(g / median - 1), 0) / gaps.length;
+  return Math.max(0, Math.min(1, 1 - spread));
 }
 
 /** 코드 인식에 필요한 최소 비트 수. 이보다 적으면 격자라고 부를 수 없다 */
@@ -253,80 +279,14 @@ function recognizeChords(
   });
 }
 
-/**
- * 2배 후보를 이만큼은 자기상관이 지목해야 갈아탄다.
+/*
+ * **`resolveDupleMeter`와 `DUPLE_RIVAL`이 2026-09-12에 사라졌다.**
  *
- * `resolveOctave`의 문턱(0.7)보다 낮다 — 거기서는 악센트만 보지만 여기서는
- * **박자 판정이 2/4라는 독립된 증거**가 이미 하나 있기 때문이다.
+ * 2박 신고를 받아 템포를 두 배로 올리던 자동 교정이다. 축 B가 없어져 신고
+ * 자체가 안 나오고, 무엇보다 **고치려던 오류를 모델이 애초에 안 낸다.**
+ * 그 함수가 실제로 값을 한 사례(곡F MR 164.0 → 82.0)와 악센트 게이트를
+ * 나중에 붙인 이력은 CLAUDE.md와 `docs/템포_배수오류_미해결.md`에 남아 있다.
  */
-const DUPLE_RIVAL = 0.25;
-
-/**
- * **2/4가 나왔다면 템포가 절반이라고 본다.** 갈아탈 이유가 없으면 `null`.
- *
- * ## 왜 이 규칙이 맞는가
- *
- * 대중음악에서 2/4는 드물다. 반대로 **템포가 절반으로 잡히면 진짜 4/4 마디가
- * 우리 박으로 정확히 2박이 되어** 축 B가 2를 고른다. 즉 2/4라는 출력은 박자에
- * 대한 답이라기보다 **"비트가 두 배 길다"는 신고**에 가깝다.
- *
- * `resolveOctave`가 먼저 악센트로 같은 것을 잡지만, 그쪽은 반박이 뚜렷해야만
- * 걸린다. 여기는 **박자 판정 결과라는 다른 증거**를 쓰므로 그것이 놓친 경우를
- * 받는다.
- *
- * ## 확인하고 바꾼다
- *
- * 무조건 두 배로 올리지 않는다. 자기상관 후보에 2배가 실제로 있어야 하고
- * (`DUPLE_RIVAL`), **반박 자리에 실제로 소리가 있어야 하고**(`HALF_BEAT_STRONG`),
- * 두 배로 다시 추적해서 **박자가 4/4로 풀려야** 채택한다. 안 풀리면 원래 답을
- * 그대로 둔다 — 근거 없이 숫자만 두 배로 만들면 2/4가 알려주던 사실까지 지워진다.
- *
- * ## 악센트 게이트를 나중에 붙였다 (실측 2026-08-18)
- *
- * **원래 이 함수에는 악센트 검사가 없었고, 그래서 오검출이 났다.**
- * 평가셋의 `곡F`와 `곡F (MR)`는 **반주가 같은 곡**인데 81.8 대
- * 164.0(정확히 2.005배)이 나왔다. 자기상관은 둘 다 82.0으로 맞혔고, 갈린 것은
- * MR 쪽만 82 격자에서 박자가 **2/4**로 나왔다는 것뿐이다 — 멜로디를 지우자
- * 노벨티가 성겨져 축 B가 2를 골랐고, 이 함수가 그걸 "템포가 절반"이라는 신고로
- * 읽어 두 배로 올렸다.
- *
- * 반박 세기를 재 보면 갈린다. **제대로 두 배가 된 세 곡은 전부 0.5 이상인데
- * 이 오검출만 0.334다**:
- *
- * | 두 배로 올린 곡 | 반박 세기 | 경로 | 정답 |
- * |---|---|---|---|
- * | 곡A (가수) | 0.528 | `resolveOctave` | ✅ 173 |
- * | 곡A 한국어ver | 0.638 | `resolveOctave` | ✅ 173 |
- * | 곡H | 0.600 | `resolveOctave` | ✅ 180 |
- * | **곡F (MR)** | **0.334** | **여기** | ❌ (쌍둥이가 82) |
- *
- * 즉 **문턱을 새로 정할 필요가 없었다** — `resolveOctave`가 이미 쓰던 0.4가
- * 그대로 가른다. 배증 경로가 둘인데 한쪽만 악센트를 확인하고 있었던 것이 버그다.
- */
-export function resolveDupleMeter(
-  onset: Float32Array,
-  fps: number,
-  tempo: TempoEstimate,
-  track: BeatTrack,
-  meter: MeterEstimate,
-  measure: (beats: readonly number[]) => MeterEstimate,
-): { track: BeatTrack; meter: MeterEstimate } | null {
-  if (meter.beatsPerBar !== 2 || track.bpm <= 0) return null;
-  const doubled = track.bpm * 2;
-  if (doubled > MAX_BPM) return null;
-  const rival = tempo.candidates.find(
-    (c) => Math.abs(c.bpm / doubled - 1) < 0.06 && c.weight >= DUPLE_RIVAL,
-  );
-  if (!rival) return null;
-  // 2/4라는 신고만으로는 부족하다 — 두 배 격자의 반박 자리가 빈 곳이면
-  // 거기에 비트를 세울 근거가 없다(위 표).
-  if (halfBeatStrength(onset, fps, track.beats) < HALF_BEAT_STRONG) return null;
-
-  const faster = trackBeats(onset, fps, doubled);
-  if (faster.beats.length < 8 || faster.bpm <= 0) return null;
-  const remeasured = measure(faster.beats);
-  return remeasured.beatsPerBar === 4 ? { track: faster, meter: remeasured } : null;
-}
 
 /** 박자표를 악센트 패턴으로. 숫자만으로는 3/4와 6/8이 헷갈린다(사양서 §6). */
 export function accentPattern(beatsPerBar: number): string {

@@ -632,6 +632,68 @@ export function NumberField({ value, active, unit }: NumberFieldProps) {
   );
 }
 
+export interface TextFieldProps {
+  value: string;
+  /** 비어 있을 때 회색으로 비치는 예시 */
+  placeholder?: string;
+  /** 칸 아래 설명 한 줄 */
+  hint?: string;
+  disabled?: boolean;
+  /** 새 문제가 올 때마다 바뀌는 값. 바뀌면 초점을 다시 준다 */
+  focusKey?: string;
+  onChange?: (value: string) => void;
+  /** Enter. **조합 중의 Enter는 여기로 오지 않는다** (아래 주석) */
+  onSubmit?: () => void;
+}
+
+/**
+ * 한 줄짜리 답 입력 칸.
+ *
+ * **입력기(IME) 조합 중의 Enter를 삼킨다.** 한글로 "증"을 치면 Enter 한 번은
+ * 조합을 확정하는 키이지 제출이 아니다. 그걸 제출로 읽으면 늘 빈 답이 올라간다.
+ * `isComposing`은 크롬·사파리·파이어폭스가 모두 세워 주는 표준 신호다.
+ *
+ * **초점은 부품이 스스로 잡는다.** 문항형에서 새 문제가 뜰 때마다 사용자가 칸을
+ * 클릭해야 한다면 타이핑 입력은 쓸 수가 없다 — `focusKey`가 바뀌면 다시 잡는다.
+ */
+export function TextField({
+  value,
+  placeholder,
+  hint,
+  disabled,
+  focusKey,
+  onChange,
+  onSubmit,
+}: TextFieldProps) {
+  const ref = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (!disabled) ref.current?.focus();
+  }, [disabled, focusKey]);
+
+  return (
+    <div className="answer">
+      <input
+        ref={ref}
+        type="text"
+        className="textfield"
+        value={value}
+        placeholder={placeholder}
+        disabled={disabled}
+        autoComplete="off"
+        spellCheck={false}
+        aria-label="답"
+        onChange={(event) => onChange?.(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
+          event.preventDefault();
+          onSubmit?.();
+        }}
+      />
+      {hint && <span className="textfield__hint">{hint}</span>}
+    </div>
+  );
+}
+
 export interface ChoiceRowProps {
   /**
    * 버튼 하나당 `[고르면 올라가는 값, 아래 줄 부제]`.
@@ -718,6 +780,177 @@ export function Hint({ children }: { children: ReactNode }) {
   return <p className="hint">{children}</p>;
 }
 
+// --- 건반 ---------------------------------------------------------------------
+
+export interface KeyboardKey {
+  /** 눌렸다·뗐다를 알릴 때 그대로 돌려주는 값 */
+  id: string;
+  /** 건반에 크게 적히는 글자 */
+  label: string;
+  /** 그 아래 작게 적히는 것 */
+  caption?: string;
+  black: boolean;
+  pressed?: boolean;
+}
+
+export interface KeyboardProps {
+  /** **낮은 음부터** 흰건반·검은건반이 섞인 순서 그대로 */
+  keys: readonly KeyboardKey[];
+  onPress?: (id: string) => void;
+  onRelease?: (id: string) => void;
+  label?: string;
+  /**
+   * 누른 채 옆으로 끌면 이어서 눌리는가(글리산도). 연주에서는 켜야 하지만,
+   * **한 번 고르는 자리에서는 꺼야 한다** — 스치고 지나간 건반이 전부 선택으로
+   * 들어간다.
+   */
+  glide?: boolean;
+}
+
+/**
+ * 검은건반 폭 = 흰건반의 이만큼. 실제 피아노가 대략 0.6이다.
+ * 흰건반 경계에 **가운데를 걸치므로** 좌우로 절반씩 물린다.
+ */
+const BLACK_WIDTH = 0.62;
+
+/**
+ * 피아노 건반 — **자리만 안다.** 어떤 글자가 무슨 음인지는 위층이 정하고
+ * 여기는 `black` 플래그의 나열을 보고 흰건반 몇 번째 경계에 검은건반을
+ * 얹을지만 계산한다(그래서 어떤 음역·어떤 배치든 그대로 그린다).
+ *
+ * 폭이 `%`인 이유: 흰건반 개수가 배치마다 다르고, 화면 폭도 다르다. 픽셀로
+ * 잡으면 검은건반이 흰건반 경계에서 어긋난다.
+ *
+ * 포인터로 누른 채 옆으로 끌면 이어서 눌린다(글리산도). `pointerenter`가
+ * 버튼 상태를 함께 보기 때문이고, 그래서 **떼는 것도 `pointerleave`가 받아야**
+ * 한다 — 안 그러면 끌고 나간 건반이 계속 울린다.
+ */
+export function Keyboard({
+  keys,
+  onPress,
+  onRelease,
+  label = "건반",
+  glide = true,
+}: KeyboardProps) {
+  const whiteCount = Math.max(keys.filter((k) => !k.black).length, 1);
+  const unit = 100 / whiteCount;
+
+  let seen = 0;
+  const placed = keys.map((key) => {
+    if (key.black) {
+      return { key, left: seen * unit - (unit * BLACK_WIDTH) / 2, width: unit * BLACK_WIDTH };
+    }
+    const left = seen * unit;
+    seen += 1;
+    return { key, left, width: unit };
+  });
+
+  return (
+    <div className="piano" role="group" aria-label={label}>
+      {placed.map(({ key, left, width }) => (
+        <button
+          key={key.id}
+          type="button"
+          className={
+            `pianokey ${key.black ? "pianokey--black" : "pianokey--white"}` +
+            (key.pressed ? " pianokey--on" : "")
+          }
+          style={{ left: `${left}%`, width: `${width}%` }}
+          aria-label={key.caption ? `${key.caption} (${key.label})` : key.label}
+          aria-pressed={key.pressed ?? false}
+          onPointerDown={(e) => {
+            // 누른 채 끌 수 있어야 하므로 포인터를 이 요소에 붙들지 않는다
+            e.preventDefault();
+            onPress?.(key.id);
+          }}
+          onPointerUp={() => onRelease?.(key.id)}
+          onPointerCancel={() => onRelease?.(key.id)}
+          onPointerEnter={(e) => {
+            if (glide && e.buttons === 1) onPress?.(key.id);
+          }}
+          onPointerLeave={() => onRelease?.(key.id)}
+          // 탭으로 온 사용자. 자판 연주와 달리 한 음씩이지만 소리는 난다.
+          onKeyDown={(e) => {
+            if (e.repeat || (e.key !== " " && e.key !== "Enter")) return;
+            e.preventDefault();
+            onPress?.(key.id);
+          }}
+          onKeyUp={(e) => {
+            if (e.key !== " " && e.key !== "Enter") return;
+            onRelease?.(key.id);
+          }}
+        >
+          <span className="pianokey__label">{key.label}</span>
+          {key.caption && <span className="pianokey__caption">{key.caption}</span>}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+export interface StepperProps {
+  label: string;
+  /** 지금 값 — 문자열이다. 단위·부호를 붙이는 것은 위층의 일 */
+  value: string;
+  hint?: string;
+  /** 자판 안내 `[내리는 키, 올리는 키]` */
+  keys?: readonly [string, string];
+  canDown?: boolean;
+  canUp?: boolean;
+  onDown?: () => void;
+  onUp?: () => void;
+}
+
+/**
+ * −/+ 로 한 칸씩 옮기는 값. `StepSlider`와 달리 **끝이 정해져 있지 않고**
+ * 경계에 닿으면 그쪽 버튼만 잠긴다.
+ */
+export function Stepper({
+  label,
+  value,
+  hint,
+  keys,
+  canDown = true,
+  canUp = true,
+  onDown,
+  onUp,
+}: StepperProps) {
+  return (
+    <div className="stepper">
+      <div className="stepper__head">
+        <span className="stepper__label">{label}</span>
+        {keys && (
+          <span className="stepper__keys">
+            {keys[0]} / {keys[1]}
+          </span>
+        )}
+      </div>
+      <div className="stepper__row">
+        <button
+          type="button"
+          className="stepper__button"
+          disabled={!canDown}
+          aria-label={`${label} 내리기`}
+          onClick={onDown}
+        >
+          −
+        </button>
+        <output className="stepper__value">{value}</output>
+        <button
+          type="button"
+          className="stepper__button"
+          disabled={!canUp}
+          aria-label={`${label} 올리기`}
+          onClick={onUp}
+        >
+          +
+        </button>
+      </div>
+      {hint && <p className="stepper__hint">{hint}</p>}
+    </div>
+  );
+}
+
 // --- 악보 --------------------------------------------------------------------
 
 export interface StaffFigureProps {
@@ -732,6 +965,15 @@ export interface StaffFigureProps {
    * 여러 개라 거기 맞추면 글씨가 읽을 수 없게 작아진다.
    */
   tall?: boolean;
+  /**
+   * 지금 강조할 요소의 `id`들. 재생 커서가 쓴다.
+   *
+   * **문자열만 받는다** — 이 부품이 음표도 시각도 모르게 하기 위해서다. 어느
+   * id가 지금 울리는지는 부르는 쪽이 정한다.
+   */
+  highlight?: readonly string[];
+  /** 강조한 요소가 스크롤 밖이면 따라간다. 긴 악보에서만 뜻이 있다 */
+  follow?: boolean;
 }
 
 /**
@@ -740,8 +982,40 @@ export interface StaffFigureProps {
  * **악보를 직접 만들지 않는다** — 이미 만들어진 SVG 문자열을 받는다. 그래야
  * 이 부품이 verovio도 음악 이론도 모른 채로 남는다.
  */
-export function StaffFigure({ svg, fallback, tall }: StaffFigureProps) {
+export function StaffFigure({
+  svg,
+  fallback,
+  tall,
+  highlight,
+  follow,
+}: StaffFigureProps) {
   const className = `staff${tall ? " staff--tall" : ""}`;
+  const host = useRef<HTMLDivElement | null>(null);
+  // 붙였던 것을 떼려면 무엇을 붙였는지 기억해야 한다. 지금 강조 목록에서
+  // 역산하면 SVG가 새로 그려진 사이에 사라진 요소를 놓친다.
+  const marked = useRef<Element[]>([]);
+  const key = highlight?.join(" ") ?? "";
+
+  useEffect(() => {
+    const root = host.current;
+    if (!root) return;
+    for (const el of marked.current) el.classList.remove("staff__on");
+    marked.current = [];
+    if (!key) return;
+
+    for (const id of key.split(" ")) {
+      // CSS.escape가 없는 환경이 있어 속성 선택자를 쓴다 — id는 verovio가
+      // 만든 값이라 따옴표가 들어갈 일이 없다.
+      const el = root.querySelector(`[id="${id}"]`);
+      if (!el) continue;
+      el.classList.add("staff__on");
+      marked.current.push(el);
+    }
+    if (follow && marked.current[0]) {
+      marked.current[0].scrollIntoView({ block: "nearest", inline: "nearest" });
+    }
+  }, [key, follow, svg]);
+
   if (!svg) {
     return (
       <div className={className}>
@@ -751,7 +1025,11 @@ export function StaffFigure({ svg, fallback, tall }: StaffFigureProps) {
   }
   return (
     // 이 SVG는 앱이 스스로 만든 것이라 외부 입력이 아니다.
-    <div className={className} dangerouslySetInnerHTML={{ __html: svg }} />
+    <div
+      ref={host}
+      className={className}
+      dangerouslySetInnerHTML={{ __html: svg }}
+    />
   );
 }
 
@@ -897,9 +1175,17 @@ export interface MetricProps {
   confidence?: ConfidenceLevel;
   /** 오른쪽 위 짧은 꼬리표. "확인 필요" */
   note?: string;
+  /**
+   * 눈에 띄는 경고 한 줄. **값이 틀렸을 수 있는 구체적인 이유**를 말한다.
+   *
+   * `note`와 갈라 둔 이유는 성격이 다르기 때문이다 — `note`는 "얼마나
+   * 확신하는가"(연속적인 신뢰도의 꼬리표)이고 이쪽은 "이런 사건이 있었다"
+   * (참·거짓인 진단)다. 한 자리에 합치면 둘 중 하나가 다른 하나를 덮는다.
+   */
+  warning?: string;
 }
 
-export function Metric({ label, value, detail, confidence, note }: MetricProps) {
+export function Metric({ label, value, detail, confidence, note, warning }: MetricProps) {
   return (
     <div className={`metric${confidence ? ` metric--${confidence}` : ""}`}>
       <div className="metric__head">
@@ -908,6 +1194,7 @@ export function Metric({ label, value, detail, confidence, note }: MetricProps) 
       </div>
       <div className="metric__value">{value}</div>
       {detail && <div className="metric__detail">{detail}</div>}
+      {warning && <p className="metric__warning" role="status">{warning}</p>}
     </div>
   );
 }
@@ -1028,6 +1315,124 @@ export function PlannedNotice({
       {sections.map((s) => (
         <SpecSection key={s.title} {...s} />
       ))}
+    </div>
+  );
+}
+
+// --- 스텝 그리드 ----------------------------------------------------------------
+
+export interface StepGridRow {
+  /** React 키. 행 이름이 겹쳐도 안전해야 한다 */
+  id: string;
+  /** 왼쪽에 그대로 나가는 행 이름 */
+  label: string;
+  /**
+   * 칸마다의 세기 0~1. 0이면 빈 칸이다.
+   *
+   * 불리언이 아닌 것은 **세기(벨로시티)를 표현할 자리**를 남겨 두기 위해서다.
+   */
+  cells: readonly number[];
+  /**
+   * 채워진 칸에 찍을 글자 하나.
+   *
+   * **색만으로 구별하지 않기 위한 표식이다** — `ShareBars`가 지키는 규칙과 같다.
+   * 안 주면 칸이 색으로만 구별되므로, 행이 여럿이면 반드시 줄 것.
+   */
+  mark?: string;
+}
+
+export interface StepGridProps {
+  rows: readonly StepGridRow[];
+  /** 가는 세로줄 간격. 박마다 긋고 싶으면 한 박의 칸 수를 준다 */
+  group?: number;
+  /**
+   * 굵은 세로줄 간격. 마디마다 긋고 싶으면 한 마디의 칸 수를 준다.
+   *
+   * **두 단계가 필요하다** — 박선만 그으면 열 머리가 `1 2 3 4 2 2 3 4`처럼
+   * 읽혀 마디 번호와 박 번호가 섞인다(실측). 마디는 선이 말하고 열 머리는
+   * 박만 말하는 편이 읽기 쉽다.
+   */
+  major?: number;
+  /** 지금 재생 중인 칸. 없으면 커서를 안 그린다 */
+  cursor?: number | null;
+  /** 열 제목. 안 주면 열 머리를 그리지 않는다 */
+  columns?: readonly string[];
+  caption?: string;
+  /** 주면 칸이 눌린다 */
+  onCell?: (rowId: string, step: number) => void;
+}
+
+/**
+ * 시퀀서식 스텝 그리드. **행이 무엇인지 모른다** — 이름과 숫자만 받는다.
+ *
+ * `Matrix`로는 원리적으로 안 되는 자리라 새로 만들었다. `Matrix`는 문자열
+ * 격자(`string[][]`)이고 `row[0]`을 React 키로 쓰며 칸의 **세기**를 표현할
+ * 방법이 `--on` 하나뿐이다. 여기서 필요한 것은 네 가지가 더 있다 —
+ * 세기, 재생 커서, 박마다의 굵은 줄, 그리고 열이 64개까지 가는 가로 스크롤.
+ *
+ * **이름이 `DrumGrid`가 아닌 이유**: 이 부품은 행이 악기인지 모른다. 베이스
+ * 리프도 기타 리듬도 같은 모양이라 그때 그대로 쓴다.
+ */
+export function StepGrid({ rows, group, major, cursor, columns, caption, onCell }: StepGridProps) {
+  const width = rows.reduce((max, row) => Math.max(max, row.cells.length), 0);
+  return (
+    <div className="stepgrid">
+      {caption && <p className="stepgrid__caption">{caption}</p>}
+      <div className="stepgrid__scroll">
+        <table className="stepgrid__table">
+          {columns && (
+            <thead>
+              <tr>
+                <th />
+                {Array.from({ length: width }, (_, i) => (
+                  <th
+                    key={i}
+                    scope="col"
+                    className={[
+                      "stepgrid__head",
+                      group && i % group === 0 ? "stepgrid__head--beat" : "",
+                      major && i % major === 0 ? "stepgrid__head--bar" : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
+                  >
+                    {columns[i] ?? ""}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+          )}
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.id}>
+                <th scope="row" className="stepgrid__label">
+                  {row.label}
+                </th>
+                {Array.from({ length: width }, (_, i) => {
+                  const value = row.cells[i] ?? 0;
+                  const classes = ["stepgrid__cell"];
+                  if (value > 0) classes.push("stepgrid__cell--on");
+                  if (group && i % group === 0) classes.push("stepgrid__cell--beat");
+                  if (major && i % major === 0) classes.push("stepgrid__cell--bar");
+                  if (cursor === i) classes.push("stepgrid__cell--cursor");
+                  const content = value > 0 ? (row.mark ?? "●") : "";
+                  return (
+                    <td
+                      key={i}
+                      className={classes.join(" ")}
+                      style={value > 0 ? { opacity: 0.45 + 0.55 * Math.min(1, value) } : undefined}
+                      onClick={onCell ? () => onCell(row.id, i) : undefined}
+                    >
+                      {content}
+                      {value > 0 && <span className="sr-only">{`${row.label} ${i + 1}번 칸`}</span>}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

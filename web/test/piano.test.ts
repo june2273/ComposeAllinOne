@@ -112,11 +112,21 @@ test("로딩은 가운데(C4)에서 바깥으로 퍼진다", () => {
 /** decodeAudioData·AudioContext가 없는 jsdom에 최소한만 심는다 */
 function stubAudio() {
   const played: Array<{ rate: number }> = [];
+  /** `stop()`이 예약된 시각 */
+  const stops: number[] = [];
   /** 사인 폴백이 만든 오실레이터 주파수 */
   const sine: number[] = [];
+  /** 게인 자동화 — `release()`가 실제로 0까지 내리는지 보려면 기록이 필요하다 */
+  const ramps: Array<{ value: number; time: number }> = [];
   const gain = () => ({
     connect: (n: unknown) => n,
-    gain: { setValueAtTime: () => {}, linearRampToValueAtTime: () => {} },
+    gain: {
+      value: 0,
+      setValueAtTime: () => {},
+      cancelScheduledValues: () => {},
+      linearRampToValueAtTime: (value: number, time: number) =>
+        ramps.push({ value, time }),
+    },
   });
   vi.stubGlobal(
     "OfflineAudioContext",
@@ -154,14 +164,14 @@ function stubAudio() {
           playbackRate: { value: 1 },
           connect: (n: unknown) => n,
           start: () => played.push({ rate: src.playbackRate.value }),
-          stop: () => {},
+          stop: (t: number) => stops.push(t),
           onended: null,
         };
         return src;
       }
     },
   );
-  return { played, sine };
+  return { played, stops, sine, ramps };
 }
 
 function jsonResponse(body: unknown) {
@@ -252,6 +262,185 @@ describe("음원이 없거나 덜 받아졌을 때", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+
+  /**
+   * 악보 재생 경로. 자유 연주(`noteOn`)와 갈리는 규칙 하나를 못박는다 —
+   * **여기서는 음색을 통일한다.** 곡 중간에 악기가 바뀌면 전사가 틀린 것처럼 들린다.
+   */
+  describe("playSequence — 악보 재생", () => {
+    function fetchAll(input: RequestInfo | URL) {
+      return Promise.resolve(
+        String(input).endsWith("manifest.json") ? jsonResponse(MANIFEST) : bytesResponse(),
+      );
+    }
+
+    test("음표마다 자기 샘플을 고른다", async () => {
+      const { played } = stubAudio();
+      try {
+        const piano = new PianoSynth({ fetch: fetchAll });
+        await piano.load();
+        // 60은 C4vL의 root라 배속 1, 62는 Ds4vL을 한 반음 내려 쓴다.
+        // 한 region을 둘 다에 쓰고 있으면 이 둘이 같은 값으로 나온다.
+        piano.playSequence([
+          { midi: 60, startSec: 0, endSec: 0.5 },
+          { midi: 62, startSec: 0.5, endSec: 1 },
+        ]);
+        expect(played).toHaveLength(2);
+        expect(played[0].rate).toBeCloseTo(1, 9);
+        expect(played[1].rate).toBeCloseTo(2 ** (-100 / 1200), 9);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    test("한 음이라도 샘플이 없으면 시퀀스 전체가 사인으로 난다", async () => {
+      const { played, sine } = stubAudio();
+      try {
+        const piano = new PianoSynth({
+          fetch: (input) => {
+            const url = String(input);
+            if (url.endsWith("manifest.json")) return Promise.resolve(jsonResponse(MANIFEST));
+            if (url.includes("C7vL")) return Promise.resolve({ ok: false, status: 404 } as Response);
+            return Promise.resolve(bytesResponse());
+          },
+        });
+        await piano.load();
+        piano.playSequence([
+          { midi: 60, startSec: 0, endSec: 0.5 },
+          { midi: 96, startSec: 1, endSec: 1.5 },
+        ]);
+        expect(played).toHaveLength(0);
+        expect(sine.length).toBeGreaterThan(0);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    test("사인으로 넘어갈 때도 앞 샘플을 끊는다", async () => {
+      // **샘플은 배경에서 하나씩 도착하므로 `canPlay`는 곡 중에도 뒤집힌다.**
+      // 그 순간 앞 문제의 샘플 음을 안 끊으면 "한 문제가 한 소리" 규칙이
+      // 깨진 채 사인과 겹쳐 울린다.
+      const { played, stops, sine } = stubAudio();
+      try {
+        const piano = new PianoSynth({
+          fetch: (input) => {
+            const url = String(input);
+            if (url.endsWith("manifest.json")) return Promise.resolve(jsonResponse(MANIFEST));
+            if (url.includes("C7vL")) return Promise.resolve({ ok: false, status: 404 } as Response);
+            return Promise.resolve(bytesResponse());
+          },
+        });
+        await piano.load();
+
+        piano.playNotes([60], 2);
+        expect(played).toHaveLength(1);
+        // 예약된 끝 시각 하나. 아직 아무도 강제로 끄지 않았다
+        expect(stops.filter((t) => t === undefined)).toHaveLength(0);
+
+        // 샘플이 없는 음 → 사인으로 떨어진다
+        piano.playNotes([96], 2);
+        expect(sine.length).toBeGreaterThan(0);
+        // 인자 없는 stop() = 지금 끊어라. 앞의 샘플 노드가 실제로 받았다
+        expect(stops.filter((t) => t === undefined)).toHaveLength(1);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    test("사인으로 넘겨도 손잡이는 살아 있다", async () => {
+      stubAudio();
+      try {
+        // 매니페스트가 없으니 통째로 폴백이다
+        const piano = new PianoSynth({
+          fetch: () => Promise.resolve({ ok: false, status: 404 } as Response),
+        });
+        await piano.load();
+        const handle = piano.playSequence([{ midi: 60, startSec: 0, endSec: 1 }]);
+        expect(handle.positionSec()).not.toBeNull();
+        // 피아노를 멈추면 폴백도 함께 멈춘다 — 손잡이가 그것을 안다
+        piano.stop();
+        expect(handle.positionSec()).toBeNull();
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+  });
+
+  /**
+   * 자유 연주 경로. **`playNotes`와 정면으로 다른 규칙 하나**를 여기서 못박는다 —
+   * 새 음이 앞의 음을 끊으면 화음이 나지 않는다.
+   */
+  describe("noteOn — 누르고 있는 동안", () => {
+    function loaded() {
+      return new PianoSynth({
+        fetch: (input) =>
+          Promise.resolve(
+            String(input).endsWith("manifest.json") ? jsonResponse(MANIFEST) : bytesResponse(),
+          ),
+      });
+    }
+
+    test("앞의 음을 끊지 않는다 — 화음이 난다", async () => {
+      const { played, stops } = stubAudio();
+      try {
+        const piano = loaded();
+        await piano.load();
+        piano.noteOn(60);
+        piano.noteOn(64);
+        piano.noteOn(67);
+        expect(played).toHaveLength(3);
+        // 아무것도 끝나지 않았다. playNotes였다면 앞의 둘이 여기서 죽는다.
+        expect(stops).toHaveLength(0);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    test("release가 게인을 0까지 내리고 소스를 끝낸다", async () => {
+      const { stops, ramps } = stubAudio();
+      try {
+        const piano = loaded();
+        await piano.load();
+        const note = piano.noteOn(60);
+        expect(ramps).toHaveLength(0);
+        note.release();
+        expect(ramps.at(-1)!.value).toBe(0);
+        // 매니페스트의 release(0.6초)만큼 여운을 준 뒤 끝난다
+        expect(ramps.at(-1)!.time).toBeCloseTo(MANIFEST.release, 6);
+        expect(stops).toHaveLength(1);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    test("두 번 떼도 한 번만 처리한다 — 자판·마우스·MIDI가 같은 음을 잡는다", async () => {
+      const { stops } = stubAudio();
+      try {
+        const piano = loaded();
+        await piano.load();
+        const note = piano.noteOn(60);
+        note.release();
+        note.release();
+        expect(stops).toHaveLength(1);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    test("음원이 없는 음은 **그 음만** 사인으로 난다", async () => {
+      const { played, sine } = stubAudio();
+      try {
+        const piano = loaded();
+        await piano.load();
+        piano.noteOn(60); // 샘플 있음
+        piano.noteOn(20); // 어느 region에도 없다
+        expect(played).toHaveLength(1);
+        expect(sine.length).toBeGreaterThan(0);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
   });
 
   // 사인 신스를 주면 안 된다 — 그쪽도 AudioContext를 만들기 때문에 첫 재생에서

@@ -13,9 +13,26 @@
  * 미는데, 브라우저의 리샘플링이 Python판의 선형 보간과 같은 역할을 한다.
  */
 
-import { type AudioBackend, ARPEGGIO_GAP_SEC, NullSynth } from "../core/audio";
+import {
+  type AudioBackend,
+  ARPEGGIO_GAP_SEC,
+  DEFAULT_VELOCITY,
+  type NoteHandle,
+  NullSynth,
+  SILENT_SEQUENCE,
+  type Sequence,
+  type SequenceNote,
+} from "../core/audio";
 import type { PlayMode } from "../core/config";
-import { SineSynth } from "./synth";
+import {
+  HELD_LEVEL,
+  SEQUENCE_LOOKAHEAD,
+  type SequenceState,
+  SineSynth,
+  rampDown,
+  scheduledNotes,
+  sequenceHandle,
+} from "./synth";
 
 const MANIFEST_URL = "piano/manifest.json";
 const BASE = "piano/";
@@ -109,6 +126,8 @@ export class PianoSynth implements AudioBackend {
   private manifest: PianoManifest | null = null;
   private ctx: AudioContext | null = null;
   private active: AudioBufferSourceNode[] = [];
+  /** 지금 도는 시퀀스. `stop()`이 여기에 끝났음을 적는다 */
+  private sequence: SequenceState | null = null;
   /** 음원을 하나라도 쓸 수 있게 됐는가 (화면에 알릴 일이 생기면 쓴다) */
   loaded = false;
 
@@ -186,12 +205,16 @@ export class PianoSynth implements AudioBackend {
     velocity = 80,
   ): void {
     if (!midiNotes.length) return;
+    // **앞 소리를 먼저 끊는다 — 폴백으로 넘어갈 때도 그렇다.** 여기서 빠뜨리면
+    // 샘플로 난 앞 문제의 음이 계속 울리는 채로 다음 문제가 사인으로 겹친다
+    // (`fallback.stop()`은 자기 사인 음만 끄지 이쪽 노드를 모른다). 샘플은
+    // 배경에서 하나씩 도착하므로 canPlay는 곡 중에도 참↔거짓을 오간다.
+    this.stop();
     // 한 문제 안에서 음색이 섞이면 오히려 헷갈린다 — 전부 되거나 전부 사인이다.
     if (!this.canPlay(midiNotes, velocity)) {
       this.fallback.playNotes(midiNotes, duration, mode, velocity);
       return;
     }
-    this.stop();
 
     const ctx = this.context();
     const regions = this.manifest!.regions;
@@ -226,7 +249,111 @@ export class PianoSynth implements AudioBackend {
     });
   }
 
+  /**
+   * 누르고 있는 동안 울리는 한 음 — 자유 연주가 쓰는 경로.
+   *
+   * `playNotes`와 갈리는 곳이 셋이다. (1) **`stop()`을 부르지 않는다** — 앞
+   * 음을 끊으면 화음이 나지 않는다. (2) 끝 시각을 예약하지 않고 `release()`가
+   * 정한다. (3) 음원이 없는 음은 **그 음만** 사인으로 낸다 — 문항형에서 음색을
+   * 통일하는 규칙(`canPlay`)은 "한 문제가 한 소리"라서 있는 것이고, 연주에서는
+   * 방금 누른 음이 조용해지는 편이 훨씬 나쁘다.
+   */
+  noteOn(midiNote: number, velocity = 80): NoteHandle {
+    if (!this.canPlay([midiNote], velocity)) {
+      return this.fallback.noteOn(midiNote, velocity);
+    }
+    const ctx = this.context();
+    const region = pickRegion(this.manifest!.regions, midiNote, velocity)!;
+    const buffer = this.buffers.get(region.file)!;
+    const release = this.manifest!.release;
+    const start = ctx.currentTime;
+    const level = (velocity / 127) * HELD_LEVEL;
+
+    const env = ctx.createGain();
+    env.connect(ctx.destination);
+    env.gain.setValueAtTime(level, start);
+
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+    src.playbackRate.value = playbackRateFor(region, midiNote);
+    src.connect(env);
+    src.start(start);
+    this.active.push(src);
+    src.onended = () => {
+      this.active = this.active.filter((n) => n !== src);
+    };
+
+    let released = false;
+    return {
+      release: () => {
+        if (released) return;
+        released = true;
+        const now = ctx.currentTime;
+        rampDown(env.gain, now, release);
+        try {
+          src.stop(now + release + 0.02);
+        } catch {
+          // 샘플이 이미 끝까지 울렸다 (3초짜리를 그보다 길게 누른 경우)
+        }
+      },
+    };
+  }
+
+  /**
+   * 악보 재생 — 음표를 한 번에 전부 예약한다.
+   *
+   * **음색은 `playNotes`처럼 통일한다.** 한 음이라도 샘플이 없으면 시퀀스 전체를
+   * 사인으로 낸다 — 곡 중간에서 악기가 바뀌면 전사가 틀린 것처럼 들린다.
+   * (자유 연주의 `noteOn`이 그 음만 사인으로 내는 것과 갈리는 자리다. 거기서는
+   * 방금 누른 건반이 조용한 것이 더 나쁘고, 여기서는 그 반대다.)
+   */
+  playSequence(notes: readonly SequenceNote[], fromSec = 0): Sequence {
+    if (!notes.length) return SILENT_SEQUENCE;
+    const pitches = notes.map((n) => n.midi);
+    const velocity = notes[0].velocity ?? DEFAULT_VELOCITY;
+    // `playNotes`와 같은 이유로 폴백보다 먼저 끊는다
+    this.stop();
+    if (!this.canPlay(pitches, velocity)) {
+      return this.fallback.playSequence(notes, fromSec);
+    }
+
+    const ctx = this.context();
+    const regions = this.manifest!.regions;
+    const release = this.manifest!.release;
+    const base = ctx.currentTime + SEQUENCE_LOOKAHEAD;
+
+    for (const { note, start, end } of scheduledNotes(notes, fromSec, base)) {
+      const level = ((note.velocity ?? velocity) / 127) * HELD_LEVEL;
+      const region = pickRegion(regions, note.midi, note.velocity ?? velocity)!;
+      const buffer = this.buffers.get(region.file)!;
+
+      const env = ctx.createGain();
+      env.connect(ctx.destination);
+      env.gain.setValueAtTime(level, start);
+      env.gain.setValueAtTime(level, end);
+      env.gain.linearRampToValueAtTime(0, end + release);
+
+      const src = ctx.createBufferSource();
+      src.buffer = buffer;
+      src.playbackRate.value = playbackRateFor(region, note.midi);
+      src.connect(env);
+      src.start(start);
+      src.stop(end + release + 0.02);
+      this.active.push(src);
+      src.onended = () => {
+        this.active = this.active.filter((n) => n !== src);
+      };
+    }
+    const state: SequenceState = { stopped: false };
+    this.sequence = state;
+    return sequenceHandle(ctx, base, fromSec, state, () => this.stop());
+  }
+
   stop(): void {
+    if (this.sequence) {
+      this.sequence.stopped = true;
+      this.sequence = null;
+    }
     this.fallback.stop();
     for (const node of this.active) {
       try {

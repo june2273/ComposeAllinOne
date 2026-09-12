@@ -21,7 +21,9 @@ import {
   extractOnsetCurve,
   type AnalysisProgress,
   type AnalysisReport,
+  type BeatGrid,
 } from "../core/analysis";
+import { detectDrums, type DetectOptions, type DrumDetection } from "../core/drums";
 import type { OnsetCurve } from "../core/transcribe";
 
 export type { AnalysisProgress, AnalysisReport };
@@ -109,9 +111,10 @@ function runInWorker(
   worker: Worker,
   samples: Float32Array,
   sampleRate: number,
+  grid: BeatGrid,
   onProgress?: (progress: AnalysisProgress) => void,
   signal?: AbortSignal,
-  forceBpm?: number,
+  ratio?: number,
 ): Promise<AnalysisReport> {
   return new Promise((resolve, reject) => {
     if (signal) {
@@ -147,7 +150,7 @@ function runInWorker(
       reject(new Error(event.message || "분석 워커가 죽었습니다"));
     };
     // 샘플 버퍼는 소유권째 넘긴다 — 4분 곡이면 20MB다
-    worker.postMessage({ samples, sampleRate, forceBpm }, [samples.buffer]);
+    worker.postMessage({ samples, sampleRate, grid, ratio }, [samples.buffer]);
   });
 }
 
@@ -159,12 +162,17 @@ function runInWorker(
  */
 export async function analyzeFile(
   file: Blob,
+  /**
+   * 사이드카에서 받은 비트 격자. **워커가 직접 못 받아 온다** — 거기엔
+   * 네트워크가 없다(층 규칙이기도 하다: 워커는 순수 DSP다).
+   */
+  grid: BeatGrid,
   onProgress?: (progress: AnalysisProgress) => void,
   env: AnalyzeEnv = {},
   /** 화면을 떠나면 끊는다. 워커를 종료시킨다 */
   signal?: AbortSignal,
-  /** 사용자가 템포 후보를 직접 골랐을 때만 준다 — `AnalysisOptions.forceBpm` */
-  forceBpm?: number,
+  /** 사용자가 배수 후보를 직접 골랐을 때만 준다 — `AnalysisOptions.ratio` */
+  ratio?: number,
 ): Promise<AnalysisReport> {
   onProgress?.({ stage: "파일 읽는 중", ratio: 0 });
   const bytes = await file.arrayBuffer();
@@ -182,30 +190,34 @@ export async function analyzeFile(
 
   const worker = (env.makeWorker ?? defaultWorker)();
   // 워커가 없으면 같은 스레드에서 도는데, 그때는 중간에 끊을 자리가 없다
-  if (!worker) return analyzeAudio(samples, sampleRate, forward, { forceBpm });
-  return runInWorker(worker, samples, sampleRate, forward, signal, forceBpm);
+  if (!worker) return analyzeAudio(samples, grid, sampleRate, forward, { ratio });
+  return runInWorker(worker, samples, sampleRate, grid, forward, signal, ratio);
 }
 
 /**
- * 오디오 하나에서 온셋 곡선만 뽑는다. **보컬 스템을 넣는다.**
+ * 디코딩 → 워커에 한 가지 일을 맡기고 결과 하나를 받는다.
  *
- * 전사의 노트 분할이 쓰는 것이다 — f0는 같은 음을 두 번 부른 것을 표현할 수
- * 없어서 경계의 증거를 밖에서 받아야 한다(`core/transcribe/notes.ts`).
+ * `extractOnset`과 `extractDrums`가 **같은 결선**이다. 셋째가 생기기 전에
+ * 모았다 — 워커 취소·종료·오류 처리를 손으로 두 벌 들고 다니면 한쪽만 고치는
+ * 날이 온다.
  *
- * `analyzeFile`과 같은 워커를 쓰지만 진행률은 보고하지 않는다. STFT 한 번이라
- * 4분 곡에 1초 안쪽이고, 그 앞의 스템 분리가 이미 몇 분 걸린 뒤다.
+ * 진행률은 보고하지 않는다. 둘 다 STFT 한 번이라 4분 곡에 1~2초이고, 그 앞의
+ * 스템 분리가 이미 몇 분 걸린 뒤다.
  */
-export async function extractOnset(
+async function askWorker<T>(
   audio: Blob,
-  env: AnalyzeEnv = {},
+  payload: Record<string, unknown>,
+  accept: (data: Record<string, unknown>) => T | undefined,
+  local: (samples: Float32Array, sampleRate: number) => T,
+  env: AnalyzeEnv,
   signal?: AbortSignal,
-): Promise<OnsetCurve> {
+): Promise<T> {
   const bytes = await audio.arrayBuffer();
   const decode = env.decode ?? decodeWithBrowser;
   const { samples, sampleRate } = await decode(bytes);
 
   const worker = (env.makeWorker ?? defaultWorker)();
-  if (!worker) return extractOnsetCurve(samples, sampleRate);
+  if (!worker) return local(samples, sampleRate);
   return new Promise((resolve, reject) => {
     if (signal) {
       const abort = () => {
@@ -219,17 +231,61 @@ export async function extractOnset(
       signal.addEventListener("abort", abort, { once: true });
     }
     worker.onmessage = (event: MessageEvent) => {
-      const data = event.data as
-        | { type: "onset"; curve: OnsetCurve }
-        | { type: "error"; message: string };
+      const data = event.data as Record<string, unknown>;
       worker.terminate();
-      if (data.type === "onset") resolve(data.curve);
-      else reject(new Error(data.message));
+      const value = accept(data);
+      if (value !== undefined) resolve(value);
+      else reject(new Error(typeof data.message === "string" ? data.message : "분석 워커 오류"));
     };
     worker.onerror = (event) => {
       worker.terminate();
       reject(new Error(event.message || "분석 워커가 죽었습니다"));
     };
-    worker.postMessage({ job: "onset", samples, sampleRate }, [samples.buffer]);
+    worker.postMessage({ ...payload, samples, sampleRate }, [samples.buffer]);
   });
+}
+
+/**
+ * 오디오 하나에서 온셋 곡선만 뽑는다. **보컬 스템을 넣는다.**
+ *
+ * 전사의 노트 분할이 쓰는 것이다 — f0는 같은 음을 두 번 부른 것을 표현할 수
+ * 없어서 경계의 증거를 밖에서 받아야 한다(`core/transcribe/notes.ts`).
+ */
+export async function extractOnset(
+  audio: Blob,
+  env: AnalyzeEnv = {},
+  signal?: AbortSignal,
+): Promise<OnsetCurve> {
+  return askWorker(
+    audio,
+    { job: "onset" },
+    (data) => (data.type === "onset" ? (data.curve as OnsetCurve) : undefined),
+    extractOnsetCurve,
+    env,
+    signal,
+  );
+}
+
+/**
+ * 오디오 하나에서 드럼 타점을 뽑는다. **드럼 스템을 넣는다.**
+ *
+ * 사이드카가 만든 `stems/drums.wav`를 받아 브라우저에서 돈다 — `extractOnset`이
+ * `vocal_processed.wav`에 대해 하는 것과 **정확히 같은 결선**이다. 드럼 검출은
+ * 학습된 모델이 아니라 SuperFlux + 대역 규칙이므로 이 저장소의 층 기준
+ * ("학습된 모델인가")에 따라 브라우저 쪽이다.
+ */
+export async function extractDrums(
+  audio: Blob,
+  options: DetectOptions = {},
+  env: AnalyzeEnv = {},
+  signal?: AbortSignal,
+): Promise<DrumDetection> {
+  return askWorker(
+    audio,
+    { job: "drums", drumOptions: options },
+    (data) => (data.type === "drums" ? (data.drums as DrumDetection) : undefined),
+    (samples, sampleRate) => detectDrums(samples, sampleRate, options),
+    env,
+    signal,
+  );
 }

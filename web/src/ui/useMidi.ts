@@ -22,6 +22,7 @@ export interface MidiView extends MidiSnapshot {
   refresh: () => void;
 }
 
+
 /**
  * @param enabled 스테이지가 건반으로 답하는가. false면 아예 권한을 요청하지
  *   않는다 — 화면으로 답하는 스테이지에서 권한 팝업이 뜨면 방해만 된다.
@@ -32,6 +33,11 @@ export function useMidi(
   enabled: boolean,
   onNoteOn: (note: number, velocity: number, timeStamp: number) => void,
   env?: MidiEnv,
+  /**
+   * 뗐을 때. **문항형은 넘기지 않는다** — 답은 누른 순간 정해지고 언제 뗐는지는
+   * 채점에 들어가지 않는다. 자유 연주만 이것으로 소리를 끈다.
+   */
+  onNoteOff?: (note: number) => void,
 ): MidiView {
   const [snapshot, setSnapshot] = useState<MidiSnapshot>(IDLE_SNAPSHOT);
   const inputRef = useRef<WebMidiInput | null>(null);
@@ -40,6 +46,11 @@ export function useMidi(
   useEffect(() => {
     handler.current = onNoteOn;
   }, [onNoteOn]);
+
+  const offHandler = useRef(onNoteOff);
+  useEffect(() => {
+    offHandler.current = onNoteOff;
+  }, [onNoteOff]);
 
   // env를 의존성 배열에 넣으면 안 된다. 호출부가 객체 리터럴을 넘기는 순간
   // 매 렌더마다 MIDI를 닫았다 여는 꼴이 된다(권한 팝업이 반복된다).
@@ -54,6 +65,7 @@ export function useMidi(
       {
         onNoteOn: (note, velocity, timeStamp) =>
           handler.current(note, velocity, timeStamp),
+        onNoteOff: (note) => offHandler.current?.(note),
         onChange: setSnapshot,
       },
       envRef.current,

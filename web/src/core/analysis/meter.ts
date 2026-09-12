@@ -37,35 +37,25 @@
  * 맞춰야 하는 자리**다.
  */
 
-/** 3박이 4박을 이기려면 이 배수만큼 더 나아야 한다. 4/4가 압도적으로 흔하다 */
-const TRIPLE_MARGIN = 1.15;
-
-/**
- * 2박이 4박을 이기려면 넘어야 하는 배수. 3박보다 높다.
+/*
+ * **축 B(마디당 박)가 2026-09-12에 통째로 빠졌다.** 마디 길이는 이제 사이드카의
+ * 다운비트가 정한다(`server/app/beats.py`의 `beats_per_bar`, 실측 14/14).
  *
- * 4/4의 3박째도 어느 정도 세기 때문에 2박 가설은 늘 그럴듯해 보이는데(실측:
- * 정답 4/4 곡에서 4박 +0.265 대 2박 +0.241), 실제로 2/4로 적는 음악은 드물다.
+ * 함께 사라진 것: `ANSWERS`(4·3) · `TRIPLE_MARGIN`(1.15) · `DUPLE_MARGIN`(1.4) ·
+ * `FULL_CONFIDENCE_EFFECT`(0.8) · `relatedBar` · `barProbabilities` · `halfTempo`.
+ * 그 값들의 근거였던 14곡 표(정답 최고 1.391 대 오답 최저 1.412 — **문턱을 놓을
+ * 자리가 1.5%밖에 없었다**)는 CLAUDE.md와 `docs/템포_배수오류_미해결.md`에 남아
+ * 있다. 되살릴 일이 생기면 거기부터 읽을 것 — **그 좁은 창이 이 축을 버린
+ * 이유이지, 버린 탓에 생긴 문제가 아니다.**
  *
- * ## 이 마진을 더 올리려다 되돌렸다 (2026-08-11)
- *
- * "4/4가 아니면 맞대결 70%를 넘어야 한다"로 올린 적이 있다. 계산상 **2/4는
- * 그 문턱을 원리적으로 못 넘는다** — 2가 4를 나누는 탓에 순수한 2박 신호에서도
- * 4박 가설이 효과의 2/3를 가져가 맞대결 몫이 60%에서 천장을 친다. 즉 2/4를
- * 사실상 끄는 변경이었고, **진짜 2/4 동요를 넣어도 4/4가 나왔다**(실측).
- *
- * 2/4와 4/4를 악센트만으로 가르는 것은 지금 방법으로는 어렵다는 판단이라,
- * 문턱을 높여 한쪽을 끄는 대신 **2/4가 나오면 그것을 배수 오류의 신호로 쓰는**
- * 쪽으로 갔다(`analysis/index.ts`의 `resolveDupleMeter`).
+ * **축 A(3분할·셔플)는 그대로다.** 다운비트가 답하지 않는 물음이라 여기 남는다.
  */
-const DUPLE_MARGIN = 1.4;
 /** 박 안쪽을 몇 조각으로 훑는가. 2·3 양쪽으로 나누어떨어져야 한다 */
 const SUBDIVISIONS = 12;
 /** 3분할 자리가 2분할 자리를 이 배수만큼 넘으면 3분할로 본다 */
 const COMPOUND_RATIO = 1.15;
 /** 3분할 셋째 자리가 첫째의 이 배수를 넘으면 셔플(가운데가 빈 것) */
 const SHUFFLE_RATIO = 1.6;
-/** 신뢰도 1에 해당하는 효과 크기. 0.8σ면 눈으로도 뚜렷하다 */
-const FULL_CONFIDENCE_EFFECT = 0.8;
 
 export type Subdivision = "simple" | "compound";
 
@@ -88,7 +78,7 @@ export interface MeterEstimate {
   /** 셔플·스윙. 박자표는 그대로 두고 플래그로만 남긴다 */
   readonly shuffle: boolean;
   readonly confidence: number;
-  /** 마디 길이 후보와 각각의 비율. 확률 내림차순 */
+  /** 마디 길이 후보와 각각의 비율. 확률 내림차순. **2박은 안 들어간다** */
   readonly candidates: readonly MeterCandidate[];
   readonly downbeats: readonly number[];
 }
@@ -326,119 +316,101 @@ export function barEffect(
   return best;
 }
 
+/** 밖에서 받은 마디 격자. 사이드카의 다운비트가 출처다 */
+export interface MeterGrid {
+  readonly beatsPerBar: number;
+  readonly downbeats: readonly number[];
+}
+
 /**
- * 박자표 추정. `beats`는 `trackBeats()`의 출력이다.
+ * 박자표. **마디 길이는 정하지 않고 받는다 — 여기서 하는 일은 축 A뿐이다.**
  *
- * 축 B는 스코프대로 3·4만 본다. 5/4·7/8이 필요해지면 이 배열만 늘리면 되지만,
- * 6을 넣지는 말 것 — 그건 축 B가 아니라 축 A의 물음이다.
+ * 2026-09-12 이전에는 4·3·2 가설을 노벨티 효과크기로 겨루게 했다. 그 축이
+ * 통째로 빠진 이유는 위 주석에 있고, 요지는 **문턱을 놓을 자리가 1.5%밖에
+ * 없었다**는 것이다. 지금은 사이드카의 다운비트에서 최빈 마디 길이를 세는데
+ * 정답 14곡에서 14/14이고 유일한 3/4도 맞힌다.
  *
- * **8도 넣지 말 것.** 8박 마디는 "진짜 마디"가 아니라 **우리 박이 두 배
- * 빠르다는 신고**라, 박자표의 답이 아니라 템포 교정의 입력이다(2/4를 그렇게
- * 다루는 것과 같다). 후보 목록에 넣으면 화면에 `8/4`가 뜨고 마진을 다시
- * 맞춰야 한다 — `index.resolveHalfTempo`가 `barEffect(novelty, 8)`을 직접
- * 부르는 이유다.
+ * 남은 판단은 **3분할인가 셔플인가**(`subdivisionOf`)다. 다운비트는 마디가
+ * 어디서 시작하는지만 말하지 박 **안쪽**을 말하지 않으므로, 이 물음은 여전히
+ * 우리 것이다.
  */
 export function estimateMeter(
   beats: readonly number[],
   fps: number,
   onset: Float32Array,
-  low: Float32Array,
-  chroma: Float32Array,
+  grid: MeterGrid,
 ): MeterEstimate {
   const profile = beatProfile(beats, fps, onset);
   const { subdivision, shuffle } = subdivisionOf(profile);
-  const fallback: MeterEstimate = {
-    value: "4/4",
-    beatsPerBar: 4,
-    phase: 0,
-    subdivision,
-    shuffle,
-    confidence: 0,
-    candidates: [],
-    downbeats: [],
-  };
-  if (beats.length < 8) return fallback;
 
-  const novelty = beatNovelty(beats, fps, onset, low, chroma);
+  const bar = grid.beatsPerBar > 0 ? grid.beatsPerBar : 4;
+  const downbeats = grid.downbeats;
 
-  let best = { bar: 4, phase: 0, score: -Infinity, weighted: -Infinity };
-  const perBar = new Map<number, number>();
-  const weightedBar = new Map<number, number>();
-  // **4를 먼저 본다.** 아래 비교가 `>`라서 동점이면 먼저 온 쪽이 이긴다 —
-  // 셋을 먼저 보면 완전히 평평한 신호(악센트 없는 메트로놈 트랙 등)에서
-  // 3/4가 나온다. 4/4가 압도적으로 흔하다는 `TRIPLE_MARGIN`의 취지와 반대다.
-  for (const bar of [4, 3, 2]) {
-    const barBest = { bar, ...barEffect(novelty, bar) };
-    perBar.set(bar, barBest.score);
-    // 4/4가 압도적으로 흔하므로 나머지는 마진을 넘어야 이긴다.
-    // 고르는 데만 쓰고, 신뢰도는 아래에서 원래 점수로 잰다.
-    const margin = bar === 3 ? TRIPLE_MARGIN : bar === 2 ? DUPLE_MARGIN : 1;
-    const weighted = barBest.score / margin;
-    weightedBar.set(bar, weighted);
-    if (weighted > best.weighted) best = { ...barBest, weighted };
+  // **위상은 세지 않고 찾는다.** 첫 다운비트가 몇 번째 비트인지가 곧 위상이고,
+  // 그 값은 사이드카가 이미 정한 것이라 우리가 다시 고를 여지가 없다.
+  let phase = 0;
+  if (downbeats.length && beats.length) {
+    let best = Infinity;
+    for (let i = 0; i < beats.length; i += 1) {
+      const d = Math.abs(beats[i] - downbeats[0]);
+      if (d < best) {
+        best = d;
+        phase = i;
+      }
+    }
+    phase %= bar;
   }
 
-  // **배수 관계인 마디 길이는 경쟁자가 아니다.** 2/4와 4/4는 같은 그리드를
-  // 다른 단위로 읽은 것이지 서로 다른 판정이 아니다 — 템포에서 ×2·÷2가
-  // 신뢰도를 깎지 않는 것과 같은 논리다(`tempo.relatedTempo`). 3박만이 진짜
-  // 경쟁자다. 이걸 빼먹으면 후보에 2를 넣은 것만으로 신뢰도가 절반이 된다
-  // (실측: 같은 곡에서 0.48 → 0.26).
-  const rivals = [...perBar]
-    .filter(([bar]) => !relatedBar(bar, best.bar))
-    .map(([, score]) => score);
-  const rival = rivals.length ? Math.max(...rivals) : 0;
-  const strength = Math.min(1, Math.max(0, best.score) / FULL_CONFIDENCE_EFFECT);
-  // 경쟁 마디 길이와 비슷하면 확신할 수 없다
-  const margin =
-    best.score > 0 ? Math.min(1, Math.max(0, 1 - Math.max(0, rival) / best.score)) : 0;
-  const confidence = strength * (0.5 + 0.5 * margin);
-
-  const downbeats: number[] = [];
-  for (let i = best.phase; i < beats.length; i += best.bar) downbeats.push(beats[i]);
+  const { confidence, candidates } = barConsistency(beats, downbeats, bar);
 
   return {
-    value: `${best.bar}/4`,
-    beatsPerBar: best.bar,
-    phase: best.phase,
+    value: `${bar}/4`,
+    beatsPerBar: bar,
+    phase,
     subdivision,
     shuffle,
     confidence,
-    candidates: barProbabilities(weightedBar),
-    downbeats,
+    candidates,
+    downbeats: [...downbeats],
   };
 }
 
 /**
- * 두 마디 길이가 같은 그리드의 다른 읽기인가 — 하나가 다른 하나로 나눠떨어지면.
+ * 다운비트 간격이 얼마나 한결같은가 — **이것이 새 박자 신뢰도다.**
  *
- * 2와 4가 그렇다. 3과 4는 아니다.
+ * 예전에는 4박 가설과 3박 가설의 노벨티 효과크기를 겨루게 하고 그 마진을
+ * 신뢰도로 삼았다. 축 B가 사라졌으니 그 대결도 없다. 대신 **모델이 낸
+ * 다운비트가 실제로 같은 간격으로 오는가**를 잰다 — 곡 중간에 마디가 흔들리면
+ * 그만큼 덜 믿을 일이고, 그건 겨루기 없이도 셀 수 있는 진짜 증거다.
+ *
+ * `candidates`도 여기서 나온다. 가설의 점수가 아니라 **관측된 마디 길이의
+ * 분포**라, 화면의 막대가 "무엇과 다퉜는가"가 아니라 "실제로 몇 박짜리 마디가
+ * 몇 번 나왔는가"를 보인다. 후자가 읽기 쉽고 무엇보다 지어낸 값이 아니다.
  */
-function relatedBar(a: number, b: number): boolean {
-  return a % b === 0 || b % a === 0;
+function barConsistency(
+  beats: readonly number[],
+  downbeats: readonly number[],
+  bar: number,
+): { confidence: number; candidates: MeterCandidate[] } {
+  const counts = new Map<number, number>();
+  for (let i = 0; i + 1 < downbeats.length; i += 1) {
+    let n = 0;
+    for (const b of beats) {
+      if (b >= downbeats[i] - 1e-6 && b < downbeats[i + 1] - 1e-6) n += 1;
+    }
+    if (n > 0) counts.set(n, (counts.get(n) ?? 0) + 1);
+  }
+  const total = [...counts.values()].reduce((a, b) => a + b, 0);
+  if (!total) return { confidence: 0, candidates: [] };
+
+  const candidates = [...counts]
+    .map(([beatsPerBar, n]) => ({
+      beatsPerBar,
+      value: `${beatsPerBar}/4`,
+      probability: n / total,
+    }))
+    .sort((x, y) => y.probability - x.probability);
+
+  return { confidence: (counts.get(bar) ?? 0) / total, candidates };
 }
 
-/**
- * 마디 길이 후보를 확률처럼 보이는 비율로.
- *
- * **마진을 적용한 점수를 쓴다** — 화면에 나가는 비율과 실제로 고른 답이 어긋나면
- * ("2박이 45%인데 왜 4/4?") 그 표시는 설명이 아니라 혼란이다.
- *
- * 음수 점수는 0으로 눌러 버린다. "다운비트 자리가 나머지보다 **약하다**"는
- * 뜻이라 후보로서 무게가 없다.
- */
-function barProbabilities(
-  weighted: ReadonlyMap<number, number>,
-): MeterCandidate[] {
-  const rows = [...weighted].map(([bar, score]) => ({
-    beatsPerBar: bar,
-    score: Math.max(0, score),
-  }));
-  const total = rows.reduce((sum, r) => sum + r.score, 0);
-  return rows
-    .map((r) => ({
-      beatsPerBar: r.beatsPerBar,
-      value: `${r.beatsPerBar}/4`,
-      probability: total > 0 ? r.score / total : 0,
-    }))
-    .sort((a, b) => b.probability - a.probability);
-}

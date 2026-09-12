@@ -36,6 +36,7 @@ import {
   transcribe,
   type PitchCurve,
 } from "../../src/core/transcribe";
+import { gridFor } from "./truth";
 import { loadMono } from "./wav";
 
 const CACHE = process.env.EVAL_CACHE ?? "../server/cache";
@@ -67,7 +68,7 @@ function slotAudio(slot: string, name: string): Float32Array {
  * 12벌이라도 비트 그리드는 하나다(그리고 이게 이 스크립트에서 제일 느리다).
  */
 function analyzeSlot(slot: string): AnalysisReport {
-  return analyzeAudio(slotAudio(slot, "input.wav"), ANALYSIS_RATE);
+  return analyzeAudio(slotAudio(slot, "input.wav"), gridFor(slot), ANALYSIS_RATE);
 }
 
 /**

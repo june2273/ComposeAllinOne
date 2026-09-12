@@ -7,20 +7,24 @@ import { NullSynth } from "../src/core/audio";
 import {
   DIATONIC_INTERVALS,
   INTERMEDIATE,
+  INTERVAL_BUILD,
   INTERVAL_HALF_STEPS,
   INTERVAL_TABLE,
   ROUND_STEPS,
   TIME_STEPS,
 } from "../src/core/config";
 import type { IntervalQuestion } from "../src/core/questions";
-import type { Result } from "../src/core/session";
-import { ShareBars } from "../src/ds";
-import { QuizPage } from "../src/ui/pages";
 import {
-  MAJOR_MINOR_TABLE,
-  PERFECT_TABLE,
-  QUALITIES,
-} from "../src/ui/stages";
+  LETTERS,
+  Pitch,
+  intervalBetween,
+  noteName,
+  parseIntervalAnswer,
+} from "../src/core/theory";
+import type { Result } from "../src/core/session";
+import { Metric, ShareBars, StaffFigure } from "../src/ds";
+import { QuizPage } from "../src/ui/pages";
+import { MAJOR_MINOR_TABLE, PERFECT_TABLE } from "../src/ui/stages";
 
 const audio = new NullSynth();
 
@@ -55,22 +59,45 @@ function slide(label: string, index: number) {
   });
 }
 
-/**
- * 성질 선택지 버튼을 누른다.
- *
- * 성질 이름은 키캡 설명에도 나오므로 **글자만으로는 두 곳이 잡힌다.** 버튼의
- * 접근명("완전 Perfect")으로 집어 선택지 쪽만 고른다.
- */
-function pickQuality(quality: string) {
-  const { label } = QUALITIES.find((q) => q.quality === quality)!;
+/** 답 칸에 글자를 넣는다. */
+function typeAnswer(text: string) {
+  const input = screen.getByLabelText("답") as HTMLInputElement;
   act(() => {
-    screen.getByRole("button", { name: `${quality} ${label}` }).click();
+    fireEvent.change(input, { target: { value: text } });
   });
+}
+
+/**
+ * Enter.
+ *
+ * `composing`이면 **입력기가 한글을 확정하는 중**이라 제출이 아니다. 이걸
+ * 제출로 읽으면 "증"을 치는 첫 Enter가 늘 빈 답을 올린다.
+ */
+function enter(composing = false) {
+  const input = screen.getByLabelText("답");
+  act(() => {
+    fireEvent.keyDown(input, { key: "Enter", isComposing: composing });
+  });
+}
+
+function answer(text: string) {
+  typeAnswer(text);
+  enter();
 }
 
 function press(key: string) {
   act(() => {
     window.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+  });
+}
+
+/**
+ * 건반 자판 폴백은 **`code`로 잡는다**(한글 입력 상태에서 `key`는 `ㅁ`이 된다).
+ * 성질·숫자 입력이 `key`를 쓰는 것과 갈리므로 헬퍼를 따로 둔다.
+ */
+function pressCode(code: string) {
+  act(() => {
+    window.dispatchEvent(new KeyboardEvent("keydown", { code, bubbles: true }));
   });
 }
 
@@ -89,28 +116,48 @@ function pressAll(...keys: string[]) {
   });
 }
 
+/**
+ * 화면의 가상 건반을 누른다.
+ *
+ * 건반의 이름표는 `caption (label)` = `자판글자 (음이름)`이고, 자판이 안 닿는
+ * 음은 음이름뿐이다 — 그래서 이름표 안에 음이름이 들어 있는 것을 찾는다.
+ */
+function pressPitch(midi: number) {
+  const name = noteName(midi);
+  const keys = [...document.querySelectorAll(".pianokey")] as HTMLElement[];
+  const key = keys.find((k) => (k.getAttribute("aria-label") ?? "").includes(name));
+  if (!key) throw new Error(`가상 건반에 ${name}이 없다`);
+  act(() => {
+    fireEvent.pointerDown(key);
+  });
+}
+
+/** 겹음정을 켠 연습 1 — 도수가 두 자리가 된다 */
+const COMPOUND_COUNT = {
+  ...INTERVAL_HALF_STEPS,
+  difficulty: {
+    ...INTERVAL_HALF_STEPS.difficulty,
+    noteHigh: 88,
+    maxIntervalNumber: 13,
+  },
+};
+
 describe("음정 본 단계", () => {
-  test("정답을 입력하면 점수가 오르고 10문제 뒤 결과가 나온다", async () => {
+  test("답을 적어 넣으면 10문제 뒤 결과가 나온다", async () => {
     const finished: Result[][] = [];
-    // 화면에 뜬 문제를 읽기 위해 QuizPage를 감싼다
-    function Probe() {
-      return (
-        <QuizPage
-          config={DIATONIC_INTERVALS}
-          audio={audio}
-          onFinished={(r) => finished.push(r)}
-        />
-      );
-    }
-    render(<Probe />);
+    render(
+      <QuizPage
+        config={DIATONIC_INTERVALS}
+        audio={audio}
+        onFinished={(r) => finished.push(r)}
+      />,
+    );
 
     for (let i = 0; i < 10; i += 1) {
       await pastLockout();
-      // 정답은 진단 문구가 아니라 DOM에 없으므로, 세션이 만든 문제를 화면
-      // 텍스트로는 알 수 없다. 대신 오답을 낸 뒤 표시되는 정답 문구로 확인한다.
-      press("1");
-      press("0");
-      press("P");        // 완전1도/0반음 — 2도~8도만 나오므로 반드시 오답
+      // 정답은 DOM에 없으므로 화면만 보고는 알 수 없다. 1도는 출제되지
+      // 않으므로 반드시 오답이고, 그 진단 문구로 결선을 확인한다.
+      answer("완전1");
       await act(async () => {
         vi.advanceTimersByTime(2400); // 피드백 2200ms
       });
@@ -119,65 +166,77 @@ describe("음정 본 단계", () => {
     expect(finished.length).toBe(1);
     expect(finished[0]).toHaveLength(10);
     expect(finished[0].every((r) => !r.correct)).toBe(true);
-    // 오답이면 진단 문구가 붙는다
     expect(finished[0][0].detail).toContain("정답:");
     expect(finished[0][0].detail).toContain("도수부터");
   });
 
-  test("도수만 넣으면 제출되지 않는다", async () => {
+  test("성질 없이 숫자만 치면 제출되지 않고 형식을 알려준다", async () => {
     render(<QuizPage config={DIATONIC_INTERVALS} audio={audio} onFinished={() => {}} />);
     await pastLockout();
-    press("3");
-    expect(screen.getByText(/성질을 고르세요/)).toBeTruthy();
-    await act(async () => {
-      vi.advanceTimersByTime(500);
-    });
+    answer("3");
+    expect(screen.getByText(/알 수 없는 답입니다/)).toBeTruthy();
     expect(screen.queryByText("오답")).toBeNull();
     expect(screen.queryByText("정답")).toBeNull();
   });
 
-  test("성질을 먼저 골라도 되고, 도수가 차는 순간 제출된다", async () => {
+  test("성질만 치면 도수를 요구한다", async () => {
     render(<QuizPage config={DIATONIC_INTERVALS} audio={audio} onFinished={() => {}} />);
     await pastLockout();
-    press("M"); // 성질 먼저
-    expect(screen.getByText(/도수를 숫자 키로 입력하세요/)).toBeTruthy();
+    answer("장");
+    expect(screen.getByText(/도수까지 적으세요/)).toBeTruthy();
     expect(screen.queryByText("오답")).toBeNull();
-
-    press("1"); // 1도는 출제되지 않으므로 반드시 오답
-    const judged =
-      screen.queryByText("정답") !== null || screen.queryByText("오답") !== null;
-    expect(judged).toBe(true);
   });
 
-  test("성질과 도수가 한꺼번에 들어와도 제출된다", async () => {
+  test("입력기 조합 중의 Enter는 제출이 아니다", async () => {
     render(<QuizPage config={DIATONIC_INTERVALS} audio={audio} onFinished={() => {}} />);
     await pastLockout();
-    pressAll("M", "1"); // 1도는 출제되지 않으므로 반드시 오답
+    typeAnswer("장1");
+    enter(true); // 한글을 확정하는 Enter
+    expect(screen.queryByText("오답")).toBeNull();
+    enter(false); // 두 번째 Enter가 제출이다
     expect(screen.getByText("오답")).toBeTruthy();
   });
 
-  test("입력 칸이 '장 3도' 순서다 — 성질이 도수보다 앞", async () => {
+  test("두 자리 도수를 적을 수 있다", async () => {
     render(<QuizPage config={DIATONIC_INTERVALS} audio={audio} onFinished={() => {}} />);
     await pastLockout();
-    press("M");
-    // 음정의 이름은 "장3도"다. 칸 순서가 반대면 답을 만드는 동안 본 것과
-    // 채점 결과에 적힌 것이 뒤집혀 보인다.
-    const fields = [...document.querySelectorAll(".interval__fields .field")];
-    expect(fields.map((el) => el.textContent)).toEqual(["장", "–"]);
+    answer("장13"); // 13도는 이 설정에서 안 나오므로 반드시 오답
+    expect(screen.getByText("오답")).toBeTruthy();
   });
 
-  test("선택지는 원어 이름을 달고, 단축키는 키캡이 따로 설명한다", async () => {
+  test("한글 입력기가 꺼져 있어도 답할 수 있다", async () => {
     render(<QuizPage config={DIATONIC_INTERVALS} audio={audio} onFinished={() => {}} />);
     await pastLockout();
-    // 버튼에는 무엇을 고르는지가, 키캡에는 어느 키인지가 있다.
-    expect(screen.getByRole("button", { name: "단 minor" })).toBeTruthy();
-    // N이 minor의 N이라는 것은 이 한 줄이 유일한 설명이다 (M을 장이 가져갔다)
-    const cap = screen.getByRole("button", { name: "N 키 — 단" });
-    act(() => cap.click());
-    expect(screen.getByText(/도수를 숫자 키로 입력하세요/)).toBeTruthy();
+    answer("P1"); // 완전1도 — 출제되지 않으므로 오답이지만 답으로는 읽힌다
+    expect(screen.getByText("오답")).toBeTruthy();
+    expect(screen.queryByText(/알 수 없는 답입니다/)).toBeNull();
   });
 
-  test("반음은 입력하지 않는다 — 칸이 도수와 성질뿐이다", async () => {
+  test("예시가 성질 + 도수 순서다", async () => {
+    render(<QuizPage config={DIATONIC_INTERVALS} audio={audio} onFinished={() => {}} />);
+    await pastLockout();
+    // 음정의 이름은 "장3도"지 "3도 장"이 아니다. 예시가 뒤집혀 있으면
+    // 답을 만드는 동안 본 것과 채점 결과에 적힌 것이 어긋나 보인다.
+    const input = screen.getByLabelText("답") as HTMLInputElement;
+    expect(input.placeholder).toBe("증5");
+    expect(screen.getByText(/장3 · 증5 · 겹감7/)).toBeTruthy();
+  });
+
+  test("답 칸에 초점이 있으면 Space가 다시 듣기를 부르지 않는다", async () => {
+    const played = vi.spyOn(audio, "playNotes");
+    render(<QuizPage config={DIATONIC_INTERVALS} audio={audio} onFinished={() => {}} />);
+    await pastLockout();
+    played.mockClear();
+
+    const input = screen.getByLabelText("답");
+    act(() => {
+      fireEvent.keyDown(input, { key: " ", code: "Space", bubbles: true });
+    });
+    expect(played).not.toHaveBeenCalled();
+    played.mockRestore();
+  });
+
+  test("반음은 입력하지 않는다 — 칸이 하나뿐이다", async () => {
     render(<QuizPage config={DIATONIC_INTERVALS} audio={audio} onFinished={() => {}} />);
     await pastLockout();
     expect(screen.queryByText("반음")).toBeNull();
@@ -217,12 +276,40 @@ describe("음정 연습 1 — 반음 계산법", () => {
     expect(screen.getByText("오답")).toBeTruthy();
   });
 
-  test("성질은 묻지 않는다 — 버튼이 없다", async () => {
+  test("겹음정이면 두 자리 도수가 중간에 제출되지 않는다", async () => {
+    render(<QuizPage config={COMPOUND_COUNT} audio={audio} onFinished={() => {}} />);
+    await pastLockout();
+    press("1"); // 10~13이 될 수 있으므로 여기서 칸이 넘어가면 안 된다
+    let fields = [...document.querySelectorAll(".interval__fields .field")];
+    expect(fields[0].textContent).toBe("1");
+    press("3");
+    fields = [...document.querySelectorAll(".interval__fields .field")];
+    expect(fields[0].textContent).toBe("13");
+
+    pressAll("2", "Enter");
+    const judged =
+      screen.queryByText("정답") !== null || screen.queryByText("오답") !== null;
+    expect(judged).toBe(true);
+  });
+
+  test("홑음정이면 한 자리에서 곧장 반음 칸으로 넘어간다", async () => {
     render(
       <QuizPage config={INTERVAL_HALF_STEPS} audio={audio} onFinished={() => {}} />,
     );
     await pastLockout();
-    expect(screen.queryByText(/완전/)).toBeNull();
+    press("3");
+    const active = [...document.querySelectorAll(".interval__fields .field")].findIndex(
+      (el) => el.className.includes("field--active"),
+    );
+    expect(active).toBe(1);
+  });
+
+  test("성질은 묻지 않는다 — 답 칸이 숫자뿐이다", async () => {
+    render(
+      <QuizPage config={INTERVAL_HALF_STEPS} audio={audio} onFinished={() => {}} />,
+    );
+    await pastLockout();
+    expect(screen.queryByLabelText("답")).toBeNull();
     expect(screen.getByText("반음")).toBeTruthy();
     expect(screen.getByText("도")).toBeTruthy();
   });
@@ -273,7 +360,7 @@ describe("음정 연습 2 — 음정표", () => {
 
     const { number, halfSteps } = given();
     const quality = fromTable(number, halfSteps);
-    pickQuality(quality);
+    answer(quality);
     expect(screen.getByText("정답")).toBeTruthy();
   });
 
@@ -301,7 +388,7 @@ describe("음정 연습 2 — 음정표", () => {
     const { number, halfSteps } = given();
     const right = fromTable(number, halfSteps);
     const wrongOne = right === "감" ? "증" : "감";
-    pickQuality(wrongOne);
+    answer(wrongOne);
     expect(screen.getByText("오답")).toBeTruthy();
     expect(
       screen.getByText(new RegExp(`${number}도에 반음 ${halfSteps}개`, "u")),
@@ -316,12 +403,12 @@ describe("청음 스테이지 (자판 폴백)", () => {
       <QuizPage config={INTERMEDIATE} audio={audio} onFinished={(r) => finished.push(r)} />,
     );
     // 락아웃 구간에 잔여 입력을 흉내낸다
-    for (let i = 0; i < 40; i += 1) press("a");
+    for (let i = 0; i < 40; i += 1) pressCode("KeyA");
     expect(screen.queryByText("오답")).toBeNull();
     expect(screen.queryByText("정답")).toBeNull();
 
     await pastLockout();
-    press("a"); // C4
+    pressCode("KeyA"); // C4
     await act(async () => {
       vi.advanceTimersByTime(50);
     });
@@ -368,12 +455,115 @@ describe("네비게이션", () => {
   });
 });
 
+/**
+ * 화면에 적힌 조건("G4 · 장2도 · 위로")을 풀어 정답 음을 구한다.
+ *
+ * 세션이 든 정답을 몰래 꺼내 오지 않는 것이 요점이다 — **사용자가 화면만 보고
+ * 답을 낼 수 있는가**가 이 스테이지의 전부라, 테스트도 화면에서만 읽는다.
+ */
+function solveShown(): { given: Pitch; target: Pitch } {
+  const line = document.querySelector(".given")?.textContent ?? "";
+  const [givenName, intervalName, way] = line.split(" · ");
+  const m = /^([A-G])(♯♯|♭♭|♯|♭)?(-?\d+)$/u.exec(givenName);
+  if (!m) throw new Error(`음이름을 못 읽었다: ${line}`);
+  const alters: Record<string, number> = { "♯": 1, "♯♯": 2, "♭": -1, "♭♭": -2 };
+  const given = new Pitch(m[1], alters[m[2] ?? ""] ?? 0, Number(m[3]));
+
+  const parsed = parseIntervalAnswer(intervalName);
+  if (!parsed?.number) throw new Error(`음정을 못 읽었다: ${line}`);
+  const up = way === "위로";
+  const step = given.step + (up ? 1 : -1) * (parsed.number - 1);
+  const letter = LETTERS[((step % 7) + 7) % 7];
+  const octave = Math.floor(step / 7);
+
+  for (let alter = -2; alter <= 2; alter += 1) {
+    const target = new Pitch(letter, alter, octave);
+    const [lower, upper] = up ? [given, target] : [target, given];
+    if (upper.midi <= lower.midi) continue;
+    try {
+      if (intervalBetween(lower, upper).name === intervalName) return { given, target };
+    } catch {
+      // 이름이 없는 조합은 답이 아니다
+    }
+  }
+  throw new Error(`정답을 못 구했다: ${line}`);
+}
+
+describe("음정 해석 — 건반으로 음을 쌓는다", () => {
+  function startBuild() {
+    const finished: Result[][] = [];
+    render(
+      <QuizPage
+        config={{ ...INTERVAL_BUILD, questionCount: 3 }}
+        audio={audio}
+        onFinished={(r) => finished.push(r)}
+      />,
+    );
+    return finished;
+  }
+
+  test("조건 세 가지를 보여주고 그대로 풀린다", async () => {
+    startBuild();
+    await pastLockout();
+
+    const line = document.querySelector(".given")?.textContent ?? "";
+    expect(line.split(" · ")).toHaveLength(3);
+    expect(line).toMatch(/위로|아래로/u);
+    expect(screen.getByText("건반에서 나머지 음을 누르세요")).toBeTruthy();
+    // 답은 건반으로 낸다 — 글자를 치는 칸이 없어야 한다
+    expect(screen.queryByLabelText("답")).toBeNull();
+    expect(solveShown().target).toBeTruthy();
+  });
+
+  test("조건이 가리키는 음을 누르면 정답", async () => {
+    startBuild();
+    for (let i = 0; i < 3; i += 1) {
+      await pastLockout();
+      pressPitch(solveShown().target.midi);
+      expect(screen.getByText("정답")).toBeTruthy();
+      await act(async () => {
+        vi.advanceTimersByTime(INTERVAL_BUILD.feedbackMs + 100);
+      });
+    }
+    expect(screen.getByText("점수 3")).toBeTruthy();
+  });
+
+  /**
+   * **음고류만 보면 안 된다.** A4 대신 A5를 눌러도 통과하면 "위로·아래로"를
+   * 묻는 뜻이 사라진다 — 그래서 이 스테이지만 절대 음높이로 채점한다.
+   */
+  test("옥타브가 다르면 오답", async () => {
+    startBuild();
+    const { noteLow, noteHigh } = INTERVAL_BUILD.difficulty;
+
+    // 음역이 22반음뿐이라 **정답의 옥타브 쌍둥이가 화면에 없는 문제도 있다**
+    // (정답이 MIDI 70·71이면 ±12가 둘 다 음역 밖이다). 있는 문제가 나올
+    // 때까지 넘긴다 — 22개 중 20개가 여기 해당한다.
+    for (let i = 0; i < 5; i += 1) {
+      await pastLockout();
+      const { target } = solveShown();
+      const twin = [target.midi - 12, target.midi + 12].find(
+        (m) => m >= noteLow && m <= noteHigh,
+      );
+      if (twin !== undefined) {
+        pressPitch(twin);
+        expect(screen.getByText("오답")).toBeTruthy();
+        return;
+      }
+      await act(async () => {
+        vi.advanceTimersByTime(INTERVAL_BUILD.difficulty.timeLimitSec! * 1000 + INTERVAL_BUILD.feedbackMs + 200);
+      });
+    }
+    throw new Error("옥타브 쌍둥이가 있는 문제가 안 나왔다");
+  });
+});
+
 describe("2분할 메뉴와 옵션", () => {
   test("고른 옵션이 세션에 실제로 적용된다", async () => {
     render(<App />);
     act(() => screen.getByText("화성학").click());
     // 왼쪽 메뉴에서 고르면 오른쪽에 설명과 옵션이 뜬다
-    pickMenu("온음정");
+    pickMenu("음정");
     expect(screen.getByText("옵션 설정")).toBeTruthy();
 
     // 제한시간 눈금 0 = 10초, 라운드 눈금 0 = 5라운드
@@ -389,7 +579,7 @@ describe("2분할 메뉴와 옵션", () => {
   test("무한 눈금은 제한시간도 라운드도 끝을 없앤다", async () => {
     render(<App />);
     act(() => screen.getByText("화성학").click());
-    pickMenu("온음정");
+    pickMenu("음정");
 
     slide("제한시간", TIME_STEPS.length - 1);
     slide("라운드", ROUND_STEPS.length - 1);
@@ -412,12 +602,12 @@ describe("2분할 메뉴와 옵션", () => {
     render(<App />);
     act(() => screen.getByText("화성학").click());
 
-    pickMenu("온음정");
+    pickMenu("음정");
     expect(screen.queryByText("표 보기")).toBeNull(); // 본 단계에는 없다
-    pickMenu("반음 계산법");
-    expect(screen.queryByText("표 보기")).toBeNull(); // 성질을 안 묻는다
+    slide("단계", 0);
+    expect(screen.queryByText("표 보기")).toBeNull(); // 연습 1은 성질을 안 묻는다
 
-    pickMenu("음정표 외우기");
+    slide("단계", 1); // 연습 2 — 표를 읽는 단계
     const toggle = screen.getByLabelText("표 보기") as HTMLInputElement;
     expect(toggle.checked).toBe(false);
     act(() => {
@@ -428,15 +618,57 @@ describe("2분할 메뉴와 옵션", () => {
     expect(screen.getByText(/1 · 4 · 5 · 8도/)).toBeTruthy();
   });
 
+  test("음정 해석을 켜면 단계가 사라지고 건반으로 답하게 된다", async () => {
+    render(<App />);
+    act(() => screen.getByText("화성학").click());
+    pickMenu("음정");
+    expect(screen.getByLabelText("단계")).toBeTruthy();
+
+    act(() => {
+      fireEvent.click(screen.getByLabelText("음정 해석"));
+    });
+    // 스테이지가 하나뿐이라 단계 눈금이 아무것도 안 바꾼다 — 감춘다
+    expect(screen.queryByLabelText("단계")).toBeNull();
+
+    act(() => screen.getByText("연습 시작").click());
+    await pastLockout();
+    expect(screen.getByText("건반에서 나머지 음을 누르세요")).toBeTruthy();
+    expect(screen.queryByLabelText("답")).toBeNull();
+  });
+
+  test("낮은음자리표를 켜면 낮은 자리의 음이 나온다", async () => {
+    render(<App />);
+    act(() => screen.getByText("화성학").click());
+    pickMenu("음정");
+    act(() => {
+      fireEvent.click(screen.getByLabelText("낮은음자리표"));
+    });
+    act(() => screen.getByText("연습 시작").click());
+
+    // 악보는 jsdom에서 안 뜨고 음이름으로 떨어진다. 20문제를 훑어 C4 아래가
+    // 실제로 나오는지 본다 — 자리표 자체는 그 음을 보고 정해진다(core.test.ts).
+    let sawLow = false;
+    for (let i = 0; i < 20 && !sawLow; i += 1) {
+      await pastLockout();
+      const names = document.querySelector(".staff__fallback")?.textContent ?? "";
+      sawLow = /[A-G](♯|♭)?[0-3]/u.test(names);
+      answer("완전1"); // 2~8도만 나오므로 반드시 오답 — 다음 문제로 넘긴다
+      await act(async () => {
+        vi.advanceTimersByTime(DIATONIC_INTERVALS.feedbackMs + 100);
+      });
+    }
+    expect(sawLow).toBe(true);
+  });
+
   test("활동을 바꾸면 옵션이 그 활동의 기본값으로 돌아간다", () => {
     render(<App />);
     act(() => screen.getByText("화성학").click());
-    pickMenu("온음정");
+    pickMenu("음정");
     slide("라운드", 0); // 5라운드
     expect(screen.getByText("5라운드")).toBeTruthy();
 
     act(() => screen.getByText("텐션").click());
-    pickMenu("온음정");
+    pickMenu("음정");
     // 기본값 10라운드로 돌아와 있다
     expect(screen.getByText("10라운드")).toBeTruthy();
   });
@@ -446,7 +678,7 @@ describe("일시정지 (ESC)", () => {
   function startInterval() {
     render(<App />);
     act(() => screen.getByText("화성학").click());
-    pickMenu("온음정");
+    pickMenu("음정");
     act(() => screen.getByText("연습 시작").click());
   }
 
@@ -502,9 +734,7 @@ describe("일시정지 (ESC)", () => {
   test("피드백 중에 멈추면 재개할 때 다음 문제로 간다", async () => {
     startInterval();
     await pastLockout();
-    press("1");
-    press("0");
-    press("P"); // 2~8도만 나오므로 반드시 오답
+    answer("완전1"); // 2~8도만 나오므로 반드시 오답
     expect(screen.getByText("오답")).toBeTruthy();
 
     // 피드백(2200ms)이 끝나기 전에 멈춘다
@@ -538,7 +768,7 @@ describe("일시정지 (ESC)", () => {
   test("옵션 설정은 고른 항목과 값을 든 채 메뉴로 돌아간다", async () => {
     render(<App />);
     act(() => screen.getByText("화성학").click());
-    pickMenu("온음정");
+    pickMenu("음정");
     slide("라운드", 0);
     act(() => screen.getByText("연습 시작").click());
     await pastLockout();
@@ -609,7 +839,7 @@ describe("정답 경로 (훅 직접)", () => {
       result.current.respond({ form: "interval", number: iv.number, quality: wrong }),
     );
     expect(result.current.view.result?.correct).toBe(false);
-    expect(result.current.view.result?.detail).toContain("반음이");
+    expect(result.current.view.result?.detail).toContain("반음");
     expect(result.current.view.result?.detail).toContain("도수는 맞습니다");
   });
 });
@@ -652,3 +882,89 @@ describe("후보 몫 막대 (ds.ShareBars)", () => {
     expect(fills.map((f) => f.style.width)).toEqual(["100%", "0%"]);
   });
 });
+
+/**
+ * `note`(신뢰도 꼬리표)와 `warning`(진단 한 줄)은 **자리가 달라야 한다** —
+ * 한 곳에 합치면 둘 중 하나가 다른 하나를 덮는다.
+ */
+describe("ds.Metric — 경고", () => {
+  test("경고는 note와 함께 나오고 서로를 덮지 않는다", () => {
+    const { container } = render(
+      <Metric label="BPM" value="139.0" detail="비트 562개" note="확인 필요"
+        warning="2배 신호 — 실제 템포가 278 BPM일 수 있다" />,
+    );
+    expect(screen.getByText("확인 필요")).toBeTruthy();
+    expect(screen.getByText(/2배 신호/)).toBeTruthy();
+    // 색만으로 알리지 않는다 — 문장 자체가 화면에 있다
+    expect(container.querySelector(".metric__warning")?.textContent).toContain("278 BPM");
+  });
+
+  test("경고가 없으면 자리도 안 만든다", () => {
+    const { container } = render(<Metric label="BPM" value="120.0" />);
+    expect(container.querySelector(".metric__warning")).toBeNull();
+  });
+});
+
+/**
+ * 재생 커서가 악보 위에 붙는 자리. **verovio를 부르지 않는다** — 우리가 하는
+ * 일은 "받은 id에 클래스를 붙였다 떼는 것"뿐이고 그건 SVG 문자열만 있으면 된다.
+ */
+describe("StaffFigure — 재생 커서", () => {
+  const SVG =
+    '<svg><g id="n1"><path/></g><g id="n2"><path/></g><g id="n3"></g></svg>';
+
+  test("강조한 id에만 클래스가 붙는다", () => {
+    const { container } = render(<StaffFigure svg={SVG} highlight={["n2"]} />);
+    expect(container.querySelector("#n2")!.classList.contains("staff__on")).toBe(true);
+    expect(container.querySelector("#n1")!.classList.contains("staff__on")).toBe(false);
+  });
+
+  test("여러 개를 동시에 강조한다 — 화음·붙임줄", () => {
+    const { container } = render(
+      <StaffFigure svg={SVG} highlight={["n1", "n3"]} />,
+    );
+    const on = [...container.querySelectorAll(".staff__on")].map((e) => e.id);
+    expect(on.sort()).toEqual(["n1", "n3"]);
+  });
+
+  /** 여기가 틀리면 지나간 음표가 계속 켜진 채 남아 악보가 통째로 물든다 */
+  test("다음 음표로 넘어가면 앞의 것을 뗀다", () => {
+    const { container, rerender } = render(
+      <StaffFigure svg={SVG} highlight={["n1"]} />,
+    );
+    rerender(<StaffFigure svg={SVG} highlight={["n2"]} />);
+    const on = [...container.querySelectorAll(".staff__on")].map((e) => e.id);
+    expect(on).toEqual(["n2"]);
+  });
+
+  test("빈 목록이면 전부 뗀다 — 정지했을 때", () => {
+    const { container, rerender } = render(
+      <StaffFigure svg={SVG} highlight={["n1"]} />,
+    );
+    rerender(<StaffFigure svg={SVG} highlight={[]} />);
+    expect(container.querySelectorAll(".staff__on")).toHaveLength(0);
+  });
+
+  test("없는 id를 줘도 던지지 않는다", () => {
+    expect(() =>
+      render(<StaffFigure svg={SVG} highlight={["없는것"]} />),
+    ).not.toThrow();
+  });
+
+  test("악보가 없으면 fallback만 나온다", () => {
+    const { container } = render(
+      <StaffFigure fallback="악보를 그리는 중…" highlight={["n1"]} />,
+    );
+    expect(container.querySelector(".staff__fallback")!.textContent).toBe(
+      "악보를 그리는 중…",
+    );
+  });
+});
+
+// --- 2박 신고 → BPM 경고 --------------------------------------------------------
+
+/*
+ * **`describe("2박 신고는 BPM 경고로 나간다")` 3개가 2026-09-12에 사라졌다.**
+ * `tempoWarning`을 재던 것인데 축 B가 없어져 신고 자체가 안 나온다. 사람이
+ * 배수를 고치는 길은 후보 막대로 그대로 남아 있다(위 "후보 몫 막대" 묶음).
+ */

@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
 import sys
 import tempfile
 import time
@@ -41,12 +43,17 @@ EVALSET = ROOT / "evalset"
 CACHE = ROOT / "server" / "cache"
 
 
-def songs() -> list[dict]:
-    """정답 BPM이 있고 제외되지 않은 곡들. `songs.json`이 유일한 출처다."""
+def songs(require_truth: bool = True) -> list[dict]:
+    """제외되지 않은 곡들. `songs.json`이 유일한 출처다.
+
+    **`require_truth=False`면 정답 BPM이 없는 곡도 준다.** BPM을 대조할 때는
+    정답이 있어야 하지만, **격자를 떨굴 때는 아니다** — 웹 하니스가 보는 곡이
+    18개(정답 박자 기준)라 14개만 떨구면 나머지에서 "격자가 없다"로 죽는다.
+    """
     data = json.loads((EVALSET / "songs.json").read_text(encoding="utf-8"))
     out = []
     for s in data.get("songs", []):
-        if s.get("exclude") or not s.get("truthBpm"):
+        if s.get("exclude") or (require_truth and not s.get("truthBpm")):
             continue
         # 캐시가 없으면 원본에서 바로 읽는다 — 스템 분리를 치를 이유가 없다
         cached = CACHE / s["slot"] / "input.wav"
@@ -54,8 +61,42 @@ def songs() -> list[dict]:
         if not audio.exists():
             continue
         out.append({"slot": s["slot"], "name": s.get("name") or s["slot"],
-                    "truthBpm": float(s["truthBpm"]), "audio": str(audio)})
+                    "truthBpm": float(s["truthBpm"]) if s.get("truthBpm") else None,
+                    "audio": str(audio)})
     return out
+
+
+def _unique_name(audio: Path, slot: str, work: Path) -> Path:
+    """allin1이 스템을 슬롯별로 나눠 담게 **파일 이름을 곡마다 다르게 만든다.**
+
+    allin1은 스템을 `demix/htdemucs/<path.stem>/`, 스펙트로그램을
+    `spec/<같은 이름>.npy`로 키잉한다. 그런데 우리 캐시는 전부
+    `cache/<slot>/input.wav`라 stem이 **`input` 하나**다 — 정답 14곡 중 11곡이
+    겹친다. 그대로 두고 결과를 남기면 두 번째 곡부터 첫 곡의 스템과
+    스펙트로그램을 조용히 재사용해 **전혀 다른 곡의 BPM을 오류 없이 낸다.**
+
+    **심볼릭 링크로는 안 된다**(실측 2026-08-19). allin1의 `mkpath`가
+    `Path(p).expanduser().resolve()`라 링크를 곧바로 되짚어서 stem이 도로
+    `input`이 된다 — 링크는 걸리는데 스템은 `htdemucs/input/`에 쌓인다.
+    **하드링크는 resolve가 따라갈 대상이 없어서 이름이 유지된다.**
+    파일시스템이 갈리면(캐시가 외장 SSD, 작업 폴더가 `/tmp`) 하드링크를
+    못 걸므로 그때만 복사한다.
+    """
+    link_dir = work / "audio"
+    link_dir.mkdir(parents=True, exist_ok=True)
+    link = link_dir / f"{slot}{audio.suffix}"
+    if link.exists() or link.is_symlink():
+        # 앞선 실행이 심볼릭 링크로 남겨 둔 것을 물려받지 않는다
+        if link.is_symlink():
+            link.unlink()
+        else:
+            return link
+    try:
+        os.link(audio, link)
+    except OSError:
+        # 파일시스템이 다르다 — 곡당 수십 MB를 치른다. 분리 51초보다는 싸다
+        shutil.copy2(audio, link)
+    return link
 
 
 def verdict(ours: float, truth: float) -> str:
@@ -80,6 +121,16 @@ def main() -> int:
     # `<demix>/htdemucs/<이름>/{bass,drums,other,vocals}.wav`가 다 있으면 분리를
     # 건너뛴다(`allin1/demix.py`). 실측 분리 51초 · 추론 149초라, 폴드를 바꿔 가며
     # 재려면 이걸 재사용하는 것이 사실상 필수다.
+    #
+    # **두 가지가 함께 있어야 실제로 동작한다**(2026-08-19에 둘 다 빠져 있었다):
+    # `keep_byproducts=True`가 아니면 allin1이 매 곡 끝에 스템과 스펙트로그램을
+    # 지워서 캐시가 영영 안 맞고, 입력 파일 이름이 곡마다 달라야 한다 —
+    # 우리 캐시는 전부 `cache/<slot>/input.wav`라 stem이 `input` 하나뿐이라서
+    # 그대로 두면 **두 번째 곡부터 첫 곡의 스템을 물려받는다**(정답 14곡 중 11곡).
+    # 이름을 가르는 방법은 `_unique_name` 참조 — 심볼릭 링크는 안 통한다.
+    #
+    # **고친 뒤 실측**(곡E · fold0 · 2026-08-19): 1회차 80초 → 2회차 **22초**,
+    # BPM은 둘 다 146.0으로 같다. 스템뿐 아니라 스펙트로그램도 재사용된다.
     ap.add_argument("--demix-dir", help="분리 결과를 여기 남긴다(비우면 임시 폴더)")
     args = ap.parse_args()
 
@@ -104,8 +155,12 @@ def main() -> int:
         try:
             if args.demix_dir:
                 work = Path(args.demix_dir)
-                work.mkdir(parents=True, exist_ok=True)
-                result = structure.analyze(Path(song["audio"]), work, model=args.model)
+                result = structure.analyze(
+                    _unique_name(Path(song["audio"]), song["slot"], work),
+                    work,
+                    model=args.model,
+                    keep_byproducts=True,
+                )
             else:
                 with tempfile.TemporaryDirectory() as tmp:
                     result = structure.analyze(Path(song["audio"]), Path(tmp), model=args.model)

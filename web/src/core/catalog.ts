@@ -14,19 +14,17 @@
  * |---|---|---|---|
  * | quiz | 문제당 카운트다운 | 점수 N/10 | `Session` |
  * | performance | 곡 전체가 흐르는 타임라인 | 타이밍 정확도 | (미구현) 트랜스포트 시계 |
- * | tool | 없음 | 파일·데이터 | (미구현) 백그라운드 작업 |
+ * | tool | 없음 | 파일·데이터 | `core/analysis` + 워커 |
+ * | free | 없음 | **없음** | `AudioBackend.noteOn` |
+ *
+ * `free`는 결과가 없다는 점에서 나머지 셋과 다르다. 자유 연주는 무엇을 남기려고
+ * 하는 일이 아니라 소리를 내는 일 자체가 목적이라, 점수도 파일도 만들지 않는다.
  *
  * `Session`은 quiz 전용이다. 코드 학습(리듬 게임)이나 분석 도구를 여기에
  * 태우려 하지 말 것 — 문제 큐·제한시간·정답 판정이 전부 맞지 않는다.
  */
 
-import {
-  DIATONIC_INTERVALS,
-  INTERMEDIATE,
-  INTERVAL_HALF_STEPS,
-  INTERVAL_TABLE,
-  type SessionConfig,
-} from "./config";
+import { INTERMEDIATE, INTERVALS, type SessionConfig } from "./config";
 
 export const Domain = {
   Ear: "청음",
@@ -39,6 +37,7 @@ export const Kind = {
   Quiz: "quiz",               // 문항형 — Session이 돈다
   Performance: "performance", // 연주형 — 타임라인 위에서 친다
   Tool: "tool",               // 도구 — 입력을 분석·변환한다
+  Free: "free",               // 자유 연주 — 시간 축도 결과도 없다
 } as const;
 export type Kind = (typeof Kind)[keyof typeof Kind];
 
@@ -145,76 +144,28 @@ const EAR: Activity[] = [
 
 // --- 화성학 -----------------------------------------------------------------
 
-// 온음정은 **연습 둘 + 본 하나**로 쪼개져 있다. 앞의 둘은 본 단계에서 하는 일을
-// 반으로 나눈 것이라 순서대로 두었다 — 목록의 위아래가 곧 학습 순서다.
+// 음정은 **활동 하나에 옵션 넷**이다. 예전에는 다섯 줄이었는데(반음 계산법 ·
+// 음정표 외우기 · 온음정 · 반음정 · 겹음정) 다섯이 한 과목이라 메뉴만 길었다.
+// 단계·음 범위·겹음정이 옵션으로 내려갔고, 그래서 이 활동만 **스테이지 셋을
+// 고를 수 있다**(`config.LEVEL_CONFIGS`).
 const HARMONY: Activity[] = [
   {
-    id: "harmony.interval_halfsteps",
+    id: "harmony.interval",
     domain: Domain.Harmony,
     kind: Kind.Quiz,
-    title: "반음 계산법 (연습)",
-    summary: "두 음이 몇 도이고 반음이 몇 개인지 센다. 성질은 묻지 않는다.",
+    title: "음정",
+    summary: "두 음을 보고 음정을 구한다. 거꾸로 음을 쌓기도 한다.",
     status: Status.Ready,
-    config: INTERVAL_HALF_STEPS,
+    config: INTERVALS,
     features: [
-      "악보와 소리로 두 음을 준다",
-      "도수와 반음 개수를 숫자 키로 입력하고 Enter",
-      "여기서 '반음'은 미–파·시–도 자리의 개수다 (반음계적 거리가 아니다)",
-    ],
-  },
-  {
-    id: "harmony.interval_table",
-    domain: Domain.Harmony,
-    kind: Kind.Quiz,
-    title: "음정표 외우기 (연습)",
-    summary: "도수와 반음 개수를 주면 성질을 고른다. 계산은 빼고 표만.",
-    status: Status.Ready,
-    config: INTERVAL_TABLE,
-    features: [
-      "악보·소리와 함께 'n도 · 반음 m개'를 알려준다",
-      "완전·장·단·증·감을 버튼으로 고른다",
-      "옵션의 '표 보기'를 켜면 음정표를 보면서 풀 수 있다",
-    ],
-  },
-  {
-    id: "harmony.interval_diatonic",
-    domain: Domain.Harmony,
-    kind: Kind.Quiz,
-    title: "온음정",
-    summary: "두 음만 보고 성질과 도수를 답한다. 앞의 두 연습을 합친 본 단계.",
-    status: Status.Ready,
-    config: DIATONIC_INTERVALS,
-    features: [
-      "성질은 버튼, 도수는 숫자 키 — 둘이 다 차면 제출된다",
-      "반음 개수는 입력하지 않는다. 머릿속에서 센다",
-      "틀리면 반음이 몇 개였는지 알려준다 — 어느 연습으로 돌아갈지 보이도록",
-    ],
-  },
-  {
-    id: "harmony.interval_chromatic",
-    domain: Domain.Harmony,
-    kind: Kind.Quiz,
-    title: "반음정",
-    summary: "임시표가 붙은 음정. 증·감이 본격적으로 나온다.",
-    status: Status.Planned,
-    features: ["증·감 음정", "겹증·겹감", "이명동음 구별"],
-    requires: [
-      "theory는 이미 계산한다 — 겹증·겹감까지 검증됨",
-      "생성기가 natural()을 써서 검은건반을 거부한다. 조표에서 Pitch를 유도하는 층이 필요",
-      "UI 성질 버튼 5개 → 7개",
-    ],
-  },
-  {
-    id: "harmony.interval_compound",
-    domain: Domain.Harmony,
-    kind: Kind.Quiz,
-    title: "겹음정",
-    summary: "옥타브를 넘는 음정. 9도·11도·13도.",
-    status: Status.Planned,
-    features: ["홑음정 환원", "9·11·13도", "텐션과의 연결"],
-    requires: [
-      "intervalBetween()이 이미 9·10도를 계산한다(검증됨)",
-      "생성기의 MAX_NUMBER 상한과 음역 축만 넓히면 된다",
+      "악보와 소리로 두 음을 준다. 답은 '증5'처럼 성질 + 도수를 친다 (도는 생략)",
+      "단계 — 연습 1(도수·반음 세기) · 연습 2(성질까지) · 음정 이름(전부)",
+      "음정 해석 — 방향이 반대다. 'G4 · 장2도 · 위로'에 건반으로 A4를 누른다",
+      "음 범위 — 온음계 / 반음계(♯♭) / 겹임시표(♯♯♭♭). 켤수록 증·감이 늘어난다",
+      "겹음정 — 9도 이상. 보이는 그대로 답한다 (E♭4–F5는 장9도)",
+      "낮은음자리표 — 켜면 낮은 자리의 음도 나와 두 자리표가 섞인다",
+      "여기서 '반음'은 미–파·시–도 자리의 개수다 — 임시표를 무시하고 센 골격 값이다",
+      "한글 입력기가 꺼져 있어도 된다. P M N A D · AA DD · AAA DDD로도 친다",
     ],
   },
   {
@@ -279,6 +230,22 @@ const HARMONY: Activity[] = [
     requires: ["스케일 생성기 + 특성음 강조 재생"],
   },
   {
+    id: "harmony.free_piano",
+    domain: Domain.Harmony,
+    kind: Kind.Free,
+    title: "가상 피아노",
+    summary: "자판·마우스·MIDI 건반으로 자유롭게 친다. 문제도 점수도 없다.",
+    status: Status.Ready,
+    needsMidi: true,
+    features: [
+      "아랫줄 A S D F G H J K L ; ' 가 흰건반 — A가 도, 기본값은 C4",
+      "윗줄 W E T Y U O P가 검은건반 — 도♯ 레♯ 파♯ 솔♯ 라♯",
+      "옥타브(Z / X)와 트랜스포즈(← / →)로 음역을 옮긴다",
+      "서스테인 — 켜면 건반을 떼도 소리가 남는다",
+      "음역은 청음이 쓰는 피아노 음원이 덮는 만큼(A0~C8)이고 그 밖으로는 못 나간다",
+    ],
+  },
+  {
     id: "harmony.chord_play",
     domain: Domain.Harmony,
     kind: Kind.Performance,
@@ -321,18 +288,46 @@ const ANALYSIS: Activity[] = [
       "피치 커브 — 보컬 음정 궤적 (동작 · 사이드카)",
       "MIDI 변환 — 노래한 그대로 / 격자에 얹은 것 두 벌 (동작)",
       "악보 변환 — 멜로디 오선보 (동작 · score.ts 재사용)",
+      "악보 재생 — 분석한 BPM 격자 위에서, 재생 커서와 함께 (동작)",
+      "PDF 내보내기 — A4 여러 쪽, 브라우저 인쇄 (동작)",
       "코드 진행 — 3화음·7화음, 악보에 코드 심볼로 (동작)",
       "구조 분석 — intro·verse·pre-chorus·chorus 구간 (사이드카 · 느려서 기본 꺼짐)",
+      "드럼 — 킥·스네어·하이햇 타점을 찾아 시퀀서 격자와 타악보로 (동작 · 스템 필요)",
+      "드럼 루프·필인 — 반복되는 마디와 필인을 갈라서 목록으로 (동작)",
+      "드럼 구간 반복 재생 — 눈으로 본 그 마디를 박 클릭과 함께 (동작)",
+      "드럼 MIDI — 채널 10 GM 드럼맵. 곡 전체판과 루프 한 바퀴판 (동작)",
     ],
     requires: [
       "연습 세션이 아니다 — 점수·제한시간·문제가 없다. Session을 쓰지 않는다",
       "BPM·박자·조성은 순수 DSP라 브라우저에서 끝난다(core/analysis). 워커에서 돌린다",
       "스템 분리·멜로디·구조는 학습된 모델이라 브라우저 밖이다 — 로컬 Python 사이드카(server/). 꺼져 있으면 그 칸만 잠기고 나머지는 그대로 뜬다",
-      "사이드카 실행: cd server && .venv/bin/uvicorn app.main:app --port 8420",
+      "사이드카는 npm run dev가 함께 띄운다 — 처음 한 번만 cd server && python3.11 -m venv .venv && .venv/bin/pip install -r requirements.txt",
       "노트 분할·양자화·MIDI·악보는 순수 로직이라 웹에 있다(core/transcribe). 모델을 갈아끼워도 여기는 안 바뀐다",
       "구조 라벨 중 pre-chorus는 모델이 못 낸다 — 학습 데이터(Harmonix)의 어휘에 없어서, 사비 직전 위치 규칙으로 우리가 붙인다(core/analysis/sections.ts)",
       "변박·전조·변속은 '구간을 어떻게 나누는가'의 문제다 — 구간은 생겼고 구간마다 다시 재는 일이 남았다",
+      "드럼은 학습된 모델이 아니라 SuperFlux + 대역 규칙이라 브라우저에서 돈다(core/drums). 입력만 사이드카가 만든 드럼 스템이다",
+      "드럼 어휘는 GM 드럼맵 전부를 표로 들되 귀로 가르는 것은 여섯이다 — 심벌 종류를 못 가르는 것은 분석 표본화율(22.05kHz)의 한계다",
+      "드럼 정확도는 아직 말할 수 없다 — 정답을 찍어 둔 곡이 하나도 없고 임계값이 전부 근거 없는 값이다",
       "도입하는 라이브러리·모델은 전부 citation.md에 기록 — 이 분야는 라이선스가 제각각이고 학습 데이터 출처가 불투명한 모델이 섞여 있다",
+    ],
+  },
+  {
+    id: "analysis.pdf",
+    domain: Domain.Analysis,
+    kind: Kind.Tool,
+    title: "PDF 악보",
+    summary: "가지고 있는 PDF 악보를 열어 본다. 파일은 브라우저 밖으로 나가지 않는다.",
+    status: Status.Ready,
+    features: [
+      "PDF 열기 — 끌어다 놓거나 골라서 (동작)",
+      "쪽 이동·확대·검색·인쇄 — 브라우저 내장 뷰어가 그대로 준다 (동작)",
+      "새 창에서 열기 — 내장 뷰어가 안 되는 환경의 탈출구 (동작)",
+    ],
+    requires: [
+      "분석 콘솔과 갈라 둔 이유: 외부 악보를 보는 데 오디오 분석이 필요 없다. 콘솔 안에 넣으면 PDF 하나 보려고 곡을 먼저 분석해야 한다",
+      "브라우저 내장 뷰어에 맡긴다 — pdfjs-dist는 1MB가 넘고, 지금 얻을 것은 쪽 번호·확대를 앱이 통제하는 것뿐이다",
+      "파일은 blob URL로만 열린다. 어디에도 올라가지 않는다",
+      "전사한 멜로디를 PDF로 만드는 것은 여기가 아니라 분석 콘솔의 악보 아래에 있다 — 그 악보는 콘솔 안에서만 존재한다",
     ],
   },
 ];

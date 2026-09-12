@@ -68,6 +68,33 @@ const CHROMA_MAX_HZ = 2100;
 const LOW_MIN_HZ = 30;
 const LOW_MAX_HZ = 160;
 
+/**
+ * `extractFeatures`의 선택 산출물.
+ *
+ * **드럼을 위해 생겼다.** 합산 ODF 하나로는 킥과 하이햇이 같은 칸에 있을 때
+ * 저역이 이겨서 하이햇이 통째로 사라진다 — 봉우리 하나에 클래스 하나를 붙이는
+ * 구조적 한계다. 묶음마다 따로 봉우리를 뽑으려면 플럭스가 나뉘어 있어야 한다.
+ *
+ * **두 번째 STFT 통과를 만들지 않은 이유.** `extractChordChroma`는 창 길이가
+ * 정면으로 상충해서(2048 대 8192) 통과를 나눴지만 드럼은 짧은 창을 원하고
+ * 2048/256이 이미 짧다. 상충이 없으면 두 번째 구현은 선례가 아니라 복제다.
+ * 값은 이미 아래 루프 안에 있고(`diff`), 지금은 한 숫자로 더하고 버릴 뿐이다.
+ */
+export interface FeatureOptions {
+  /**
+   * 밴드 플럭스·에너지를 이 경계(Hz)로 묶어 함께 낸다. 안 주면 안 낸다.
+   *
+   * 경계가 N개면 묶음은 N-1개다. **필터뱅크를 다시 만들지 않는다** — 기존
+   * 205밴드를 경계마다 접을 뿐이라 비용이 사실상 0이다.
+   *
+   * **플럭스와 에너지가 둘 다 나가는 이유.** 플럭스는 "지금 뭔가 시작했다"만
+   * 말하고 얼마나 오래 울리는지는 말하지 않는다. 닫힌하이햇·열린하이햇·크래시는
+   * 시작이 똑같이 생겼고 **감쇠 길이로만 갈린다** — 그걸 재려면 포락선이 있어야
+   * 한다. 같은 루프에서 함께 나오므로 추가 비용이 없다.
+   */
+  readonly fluxBandsHz?: readonly number[];
+}
+
 export interface FrameFeatures {
   /** 초당 프레임 수 */
   readonly fps: number;
@@ -80,6 +107,28 @@ export interface FrameFeatures {
   /** 추정된 조율 편차(센트). A440 기준, 양수면 높다 */
   readonly tuningCents: number;
   readonly frameCount: number;
+  /**
+   * `fluxBandsHz`를 줬을 때만. `(frame * fluxBands + b)`로 읽는다.
+   *
+   * **워커 밖으로 보내지 말 것** — 4분 곡에 7묶음이면 12MB가 넘는다. 봉우리를
+   * 뽑고 나면 버리는 중간 산출물이다.
+   */
+  readonly bandFlux?: Float32Array;
+  /**
+   * 묶음별 **에너지 포락선 — 로그 압축 *전*의 선형 크기.** `bandFlux`와 같은
+   * 자리 매김이다.
+   *
+   * **선형인 것이 요점이다.** 로그 압축을 거친 플럭스는 "이 대역이 켜졌는가"를
+   * 재지 "에너지가 얼마인가"를 재지 않는다 — 잡음 바닥 위로 올라오기만 하면
+   * 어느 대역이든 비슷한 크기로 뛴다. 실측으로 확인했다(2026-09-03): 킥·스네어·
+   * 하이햇·크래시의 묶음별 **플럭스 비율이 전부 `[.09 .14 .29 .20 .14 .08 .05]`로
+   * 사실상 같았다.** 스펙트럼 모양으로 악기를 가르려면 선형 크기여야 한다.
+   *
+   * 감쇠 길이를 재는 데도 이쪽이 낫다 — 지수 감쇠가 지수 감쇠로 보인다.
+   */
+  readonly bandEnergy?: Float32Array;
+  /** 묶음 수. `bandFlux`가 있을 때만 */
+  readonly fluxBands?: number;
 }
 
 // --- 로그 주파수 필터뱅크 --------------------------------------------------------
@@ -87,6 +136,13 @@ export interface FrameFeatures {
 interface Band {
   readonly start: number;
   readonly weights: Float64Array;
+  /**
+   * 중심 주파수(Hz). **밴드 묶기(`fluxBandsHz`)가 이걸 쓴다.**
+   *
+   * 밴드 번호에서 계산할 수 없다 — 아래 루프가 빈이 모자란 밴드를 건너뛰므로
+   * 번호와 `i`가 어긋난다. 만들 때 함께 적어 두는 편이 싸고 안전하다.
+   */
+  readonly center: number;
 }
 
 /**
@@ -121,7 +177,7 @@ function makeBank(bins: number, sampleRate: number): Band[] {
     if (sum <= 0) continue;
     // 면적 정규화 — 고역 밴드가 넓다고 더 커지지 않게
     for (let j = 0; j < weights.length; j += 1) weights[j] /= sum;
-    bands.push({ start: from, weights });
+    bands.push({ start: from, weights, center: mid });
   }
   return bands;
 }
@@ -202,6 +258,7 @@ export function extractFeatures(
   samples: Float32Array,
   sampleRate: number,
   onProgress?: (ratio: number) => void,
+  options?: FeatureOptions,
 ): FrameFeatures {
   const frames = new SpectrumFrames(samples, FRAME_SIZE, HOP_SIZE);
   const count = frames.count;
@@ -237,9 +294,27 @@ export function extractFeatures(
   const history: Float64Array[] = [];
   for (let i = 0; i <= DIFF_FRAMES; i += 1) history.push(new Float64Array(bandCount));
 
+  // 밴드 → 묶음 표. 경계 밖의 밴드는 -1이라 어느 묶음에도 안 들어간다.
+  const edges = options?.fluxBandsHz;
+  const fluxBands = edges && edges.length >= 2 ? edges.length - 1 : 0;
+  const groupOf = fluxBands ? new Int16Array(bandCount).fill(-1) : null;
+  if (groupOf && edges) {
+    for (let b = 0; b < bandCount; b += 1) {
+      const hz = bank[b].center;
+      for (let g = 0; g < fluxBands; g += 1) {
+        if (hz >= edges[g] && hz < edges[g + 1]) {
+          groupOf[b] = g;
+          break;
+        }
+      }
+    }
+  }
+
   const onset = new Float32Array(count);
   const chroma = new Float32Array(count * 12);
   const low = new Float32Array(count);
+  const bandFlux = fluxBands ? new Float32Array(count * fluxBands) : null;
+  const bandEnergy = fluxBands ? new Float32Array(count * fluxBands) : null;
   const report = Math.max(1, Math.floor(count / 20));
 
   for (let t = 0; t < count; t += 1) {
@@ -251,6 +326,12 @@ export function extractFeatures(
       const { start, weights } = bank[b];
       let sum = 0;
       for (let j = 0; j < weights.length; j += 1) sum += mag[start + j] * weights[j];
+      // 포락선 — **로그를 씌우기 전 값이다.** 위 주석 참조: 로그를 거치면
+      // 스펙트럼 모양이 뭉개져 악기를 못 가른다.
+      if (groupOf && bandEnergy) {
+        const g = groupOf[b];
+        if (g >= 0) bandEnergy[t * fluxBands + g] += sum;
+      }
       cur[b] = Math.log10(1 + 1000 * sum);
     }
 
@@ -263,7 +344,14 @@ export function extractFeatures(
         const hi = b < bandCount - 1 ? past[b + 1] : past[b];
         const reference = Math.max(lo, past[b], hi);
         const diff = cur[b] - reference;
-        if (diff > 0) flux += diff;
+        if (diff > 0) {
+          flux += diff;
+          // 같은 값을 묶음에도 더한다. 합산 ODF는 한 줄도 안 바뀐다.
+          if (groupOf && bandFlux) {
+            const g = groupOf[b];
+            if (g >= 0) bandFlux[t * fluxBands + g] += diff;
+          }
+        }
       }
       onset[t] = flux;
     }
@@ -289,7 +377,15 @@ export function extractFeatures(
   }
   onProgress?.(1);
 
-  return { fps, onset, chroma, low, tuningCents, frameCount: count };
+  return {
+    fps,
+    onset,
+    chroma,
+    low,
+    tuningCents,
+    frameCount: count,
+    ...(bandFlux && bandEnergy ? { bandFlux, bandEnergy, fluxBands } : {}),
+  };
 }
 
 /**

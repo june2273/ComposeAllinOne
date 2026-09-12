@@ -11,8 +11,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import type { AnalysisReport } from "../core/analysis";
-import { ScoreRenderer } from "../core/score";
+import type { AnalysisReport, Section } from "../core/analysis";
+import type { AudioBackend } from "../core/audio";
 import {
   type OnsetCurve,
   type TranscribeContext,
@@ -22,13 +22,18 @@ import {
   transcribe,
 } from "../core/transcribe";
 import { extractOnset } from "../platform/analyze";
+import { DrumPanel, type DrumPanelProps } from "./drums";
+import { ScorePlayer } from "./scoreplayer";
+import { type DownloadSource, useDownloads } from "./useDownloads";
+
+/** 악보와 가창 합성기용 파일이 같은 타입을 쓴다 */
+const MUSICXML_TYPE = "application/vnd.recordare.musicxml+xml";
 import {
   AudioRow,
   Button,
   DownloadList,
   Panel,
   ProgressBar,
-  StaffFigure,
 } from "../ds";
 import {
   analyzeWithSidecar,
@@ -40,6 +45,7 @@ import {
   type SidecarProgress,
   type SidecarResult,
   type SidecarStructure,
+  waitForSidecar,
 } from "../platform/sidecar";
 
 /** 스템 이름을 사람이 읽는 말로. 이 표가 도메인 지식의 전부다 */
@@ -60,10 +66,25 @@ export interface TranscriptionPanelProps {
   /** 브라우저 분석 결과. 비트 그리드·조율·조성을 여기서 가져온다 */
   report: AnalysisReport;
   file: File;
+  /** 악보 재생이 쓴다. 소리를 못 내는 환경(테스트·jsdom)에서는 NullSynth다 */
+  audio: AudioBackend;
   /** 테스트가 가짜 사이드카를 넣는 자리 */
   env?: SidecarEnv;
-  /** 테스트가 감지를 건너뛰는 자리 */
+  /**
+   * 테스트가 감지를 건너뛰는 자리. **첫 물음만 이걸 탄다** — 그 뒤 되풀이는
+   * `waitForSidecar`가 `env.fetch`로 물으므로, 기다리는 쪽을 시험하려면
+   * `probe`가 아니라 `env`에 가짜를 넣는다.
+   */
   probe?: typeof detect;
+  /**
+   * 기동을 얼마나 기다릴 것인가. **개발 서버가 사이드카를 직접 띄우기 때문에
+   * 생긴 축이다**(`vite-sidecar.ts`) — torch를 불러오느라 십수 초가 걸리는데,
+   * 한 번 묻고 "꺼져 있다"고 말해 버리면 자동 실행이 있으나 마나가 된다.
+   *
+   * **빌드된 앱에서는 0이다** — 거기에는 띄워 줄 개발 서버가 없어서 기다리는
+   * 것이 거짓말이 된다. 테스트도 0을 주고 지금 자리에서 바로 판정한다.
+   */
+  startup?: { budgetMs?: number; retryMs?: number };
   run?: typeof analyzeWithSidecar;
   /** 테스트가 온셋 추출을 건너뛰는 자리 */
   onset?: (audio: Blob, signal?: AbortSignal) => Promise<OnsetCurve>;
@@ -73,6 +94,17 @@ export interface TranscriptionPanelProps {
    * `core/analysis/sections.ts`의 일이다.
    */
   onStructure?: (structure: SidecarStructure | null) => void;
+  /**
+   * 구간(1차 좌표). **여기서 계산하지 않고 받는다** — `analysis.tsx`가 이미
+   * `sectionsFromSegments`로 만들어 `StructureCard`에 넘기고 있고, 두 벌을
+   * 만들면 드럼 표의 `Chorus 2`와 구조 표의 `Chorus 2`가 갈릴 수 있다.
+   *
+   * 파생값이라 **새 상태도 새 파일 이름 가드도 필요 없다** — 위층이 이미
+   * `structure.file === state.file.name`으로 막아 두었다.
+   */
+  sections?: readonly Section[];
+  /** 테스트가 드럼 검출을 건너뛰는 자리 */
+  drums?: DrumPanelProps["detect"];
 }
 
 /**
@@ -98,29 +130,65 @@ async function onsetOf(
   }
 }
 
+/**
+ * 기동을 기다리는 기본값. **개발 서버에서만 기다린다** — 빌드된 앱에는
+ * 사이드카를 띄워 줄 개발 서버가 없으므로(`vite-sidecar.ts`) 기다리는 것이
+ * 거짓말이 된다. 모듈 상수인 것은 참조가 바뀌면 아래 이펙트가 다시 돌기
+ * 때문이다.
+ */
+const STARTUP_WAIT = { budgetMs: import.meta.env.DEV ? 60_000 : 0 };
+
 export function TranscriptionPanel({
   report,
   file,
+  audio,
   env,
   probe = detect,
+  startup = STARTUP_WAIT,
   run = analyzeWithSidecar,
-  onset = (audio, signal) => extractOnset(audio, {}, signal),
+  onset = (blob, signal) => extractOnset(blob, {}, signal),
   onStructure,
+  sections,
+  drums,
 }: TranscriptionPanelProps) {
-  // null = 아직 확인 중, false = 없음
-  const [health, setHealth] = useState<SidecarHealth | null | false>(null);
+  // null = 아직 확인 중, "starting" = 개발 서버가 띄우는 중, false = 없음
+  const [health, setHealth] = useState<SidecarHealth | null | false | "starting">(null);
   const [state, setState] = useState<State>({ name: "idle" });
   const running = useRef<AbortController | null>(null);
 
+  /**
+   * **한 번 묻고 끝내지 않는다.** 개발 서버가 사이드카를 함께 띄우는데
+   * (`vite-sidecar.ts`) torch를 불러오느라 기동에 십수 초가 걸린다 — 첫 물음만
+   * 보고 "꺼져 있다"고 말하면 사용자는 여전히 명령어 카드를 본다.
+   *
+   * 그래도 **처음부터 "켜는 중"을 띄우지는 않는다.** 이미 떠 있으면 1초 안에
+   * 준비 상태가 되는데 그 사이에 다른 문구가 스치면 깜빡임이 된다 — 확인 중에
+   * 아무것도 안 그리는 지금 방침의 연장이다.
+   */
   useEffect(() => {
+    const controller = new AbortController();
     let alive = true;
-    void probe(env).then((found) => {
-      if (alive) setHealth(found ?? false);
+    void probe(env).then(async (found) => {
+      if (!alive) return;
+      if (found) {
+        setHealth(found);
+        return;
+      }
+      const budget = startup.budgetMs ?? 0;
+      if (budget <= 0) {
+        setHealth(false);
+        return;
+      }
+      setHealth("starting");
+      const late = await waitForSidecar(env, budget, startup.retryMs, controller.signal);
+      if (alive) setHealth(late ?? false);
     });
     return () => {
       alive = false;
+      // 화면을 떠나면 폴링도 끝난다. 안 그러면 최대 1분을 혼자 더 묻는다
+      controller.abort();
     };
-  }, [env, probe]);
+  }, [env, probe, startup]);
 
   // 화면을 떠나면 서버 쪽 작업도 멈춘다. 스템 분리는 GPU를 수 분 잡는다.
   useEffect(() => () => running.current?.abort(), []);
@@ -195,6 +263,7 @@ export function TranscriptionPanel({
   );
 
   if (health === null) return null;
+  if (health === "starting") return <SidecarStarting />;
   if (health === false) return <SidecarMissing />;
 
   return (
@@ -242,12 +311,16 @@ export function TranscriptionPanel({
       {state.name === "done" && transcription && (
         <Results
           result={state.result}
+          report={report}
           transcription={transcription}
           bpm={report.tempo.bpm}
           beatsPerBar={report.meter.beatsPerBar}
           title={file.name}
           musicalKey={{ tonic: report.key.tonic, mode: report.key.mode }}
+          audio={audio}
           env={env}
+          sections={sections}
+          drums={drums}
           onRetry={start}
         />
       )}
@@ -293,17 +366,42 @@ function ModelNotice({
   );
 }
 
+/**
+ * 개발 서버가 사이드카를 띄우는 중. **명령어를 보여 주지 않는다** — 사용자가
+ * 할 일이 없기 때문이다. 여기서 명령을 함께 띄우면 기다리면 되는 상황에
+ * 터미널을 열게 만든다.
+ */
+function SidecarStarting() {
+  return (
+    <Panel title="AI 분석" meta="사이드카를 켜는 중">
+      <p className="muted">
+        개발 서버가 로컬 분석 서버를 함께 띄우고 있다. 모델을 불러오느라 십수 초
+        걸리고, 끝나면 이 자리가 저절로 바뀐다 — 위의 BPM·박자·조성·코드는 이미
+        나와 있으니 그동안 그것부터 보면 된다.
+      </p>
+    </Panel>
+  );
+}
+
+/**
+ * 끝내 응답이 없을 때. 자동 실행이 붙은 뒤로 여기 오는 길은 셋뿐이다 —
+ * `server/.venv`가 없거나, `SIDECAR_AUTOSTART=0`이거나, 빌드된 앱이라 띄워 줄
+ * 개발 서버가 없거나. **그래서 명령어는 그대로 남긴다** — 그 셋에서는 여전히
+ * 이것이 정답이다.
+ */
 function SidecarMissing() {
   return (
     <Panel title="AI 분석" meta="사이드카가 꺼져 있다">
       <p className="muted">
-        스템 분리와 멜로디 전사는 학습된 모델이 필요해 브라우저 안에서 끝나지
-        않는다. 로컬 서버를 띄우면 이 자리에 나타난다 — 띄우지 않아도 위의
-        BPM·박자·조성은 그대로 나온다.
+        스템 분리·멜로디 전사·<strong>비트 추적</strong>은 학습된 모델이 필요해
+        브라우저 안에서 끝나지 않는다. 보통은 <code>npm run dev</code>가 로컬
+        서버를 함께 띄우는데 응답이 없다 — 아래를 한 번 돌려 두면 다음부터는
+        저절로 뜬다. <strong>2026-09-12부터는 BPM·박자·코드·악보도 이것 없이는
+        안 나온다</strong>(템포를 자기상관에서 모델로 옮겼다).
       </p>
       <pre className="code">
         cd server{"\n"}
-        python -m venv .venv &amp;&amp; .venv/bin/pip install -r requirements.txt{"\n"}
+        python3.11 -m venv .venv &amp;&amp; .venv/bin/pip install -r requirements.txt{"\n"}
         .venv/bin/uvicorn app.main:app --port 8420
       </pre>
     </Panel>
@@ -312,21 +410,29 @@ function SidecarMissing() {
 
 function Results({
   result,
+  report,
   transcription,
   bpm,
   beatsPerBar,
   title,
   musicalKey,
+  audio,
   env,
+  sections,
+  drums,
   onRetry,
 }: {
   result: SidecarResult;
+  report: AnalysisReport;
   transcription: Transcription;
   bpm: number;
   beatsPerBar: number;
   title: string;
   musicalKey: { tonic: number; mode: "major" | "minor" };
+  audio: AudioBackend;
   env?: SidecarEnv;
+  sections?: readonly Section[];
+  drums?: DrumPanelProps["detect"];
   onRetry: () => void;
 }) {
   const files = useMemo(
@@ -338,8 +444,48 @@ function Results({
     () => toSvp(transcription, { title, bpm, key: musicalKey }),
     [bpm, musicalKey, title, transcription],
   );
-  const downloads = useDownloads(transcription, files, svp);
-  const svg = useScore(transcription.musicXml);
+  // **주소가 아니라 목록을 memo한다** — blob은 이펙트가 만들어야 한다
+  // (`useDownloads`의 첫 주석). 여기서는 무엇을 내보낼지만 정한다.
+  const sources = useMemo<DownloadSource[]>(
+    () => [
+      {
+        label: "MIDI (노래한 그대로)",
+        filename: "melody-performed.mid",
+        data: files.performed as BlobPart,
+        type: "audio/midi",
+      },
+      {
+        label: "MIDI (격자)",
+        filename: "melody-quantized.mid",
+        data: files.quantized as BlobPart,
+        type: "audio/midi",
+      },
+      {
+        label: "MusicXML (악보)",
+        filename: "melody.musicxml",
+        data: transcription.musicXml,
+        type: MUSICXML_TYPE,
+      },
+      {
+        // 가사가 있어야 가창 합성기가 발음한다(`transcribe.VOCAL_LYRIC`)
+        label: "MusicXML (가사 la · 신스V)",
+        filename: "melody-la.musicxml",
+        data: transcription.vocalXml,
+        type: MUSICXML_TYPE,
+      },
+      {
+        // **음표만 주면 신스V의 AI가 자기 피치 커브를 새로 만들어 붙인다.**
+        // 이 파일에는 원 보컬의 f0가 컨트롤 점으로 들어 있어 비브라토·
+        // 포르타멘토·스쿠핑이 그대로 간다(`core/transcribe/svp.ts`).
+        label: "신스V 프로젝트 (피치 커브 포함)",
+        filename: "melody.svp",
+        data: svp,
+        type: "application/octet-stream",
+      },
+    ],
+    [files, svp, transcription],
+  );
+  const downloads = useDownloads(sources);
 
   const range = transcription.notes.length
     ? `${Math.min(...transcription.notes.map((n) => n.midi))}~${Math.max(
@@ -350,6 +496,12 @@ function Results({
 
   return (
     <>
+      {/*
+        **후처리 보컬(`vocal_processed`)은 목록에 없다.** 파이프라인 내부의
+        중간 신호라 듣는 값이 없고(HPF·게이트·정규화를 지난 것이라 보컬 스템과
+        거의 같게 들린다) 줄만 하나 더 늘린다. 서버는 여전히 만들고 `onsetOf`가
+        가져다 쓴다 — 재발음 경계가 거기서 난다. 지우려면 그쪽부터 볼 것.
+      */}
       {result.stems.length > 0 && (
         <div className="stack">
           {result.stems.map((stem) => (
@@ -362,11 +514,6 @@ function Results({
           ))}
         </div>
       )}
-      <AudioRow
-        label="보컬(처리본)"
-        src={audioUrl(result.jobId, "vocal_processed", env)}
-        filename="vocal_processed.wav"
-      />
 
       <p className="muted">
         음표 {transcription.notes.length}개 · MIDI {range} ·{" "}
@@ -387,19 +534,28 @@ function Results({
         )}
       </p>
 
-      <StaffFigure
-        svg={svg}
-        tall
-        fallback={
-          transcription.notes.length
-            ? "악보를 그리는 중…"
-            : "멜로디를 찾지 못했다"
-        }
+      <ScorePlayer
+        transcription={transcription}
+        bpm={bpm}
+        audio={audio}
+        title={title}
       />
       <p className="muted">
         악보는 <strong>검수 전제의 초안이다</strong> — 이명동음(F♯/G♭)·성부
         분리·잇단음표는 자동으로 정해지지 않는다.
       </p>
+
+      {/*
+        **드럼은 여기 산다.** 스템은 이미 위에서 나왔고, 이 자리라야 재분석
+        (`forceBpm`)이 `TranscriptionPanel` 상태를 안 건드려 검출 결과가 살아남는다.
+      */}
+      <DrumPanel
+        jobId={result.jobId}
+        report={report}
+        sections={sections}
+        env={env}
+        detect={drums}
+      />
 
       <DownloadList items={downloads} />
       <Button onClick={onRetry}>다시 전사</Button>
@@ -429,93 +585,4 @@ function driftText(transcription: Transcription): { text: string } | null {
   };
 }
 
-interface Download {
-  label: string;
-  href: string;
-  filename: string;
-}
 
-/**
- * 내려받기 주소.
- *
- * **`useMemo`로 만들지 않는다**(StrictMode에서 두 번 불린다 — 오디오 백엔드에서
- * 이미 데인 자리다). blob 주소는 **회수하지 않으면 샌다**: 파일을 바꿔 가며
- * 여러 번 돌리면 그때마다 수십 KB가 남고, 이건 GC가 가져가지 못한다.
- * 이펙트의 정리 함수만이 "언제 버려도 되는가"를 정확히 안다.
- */
-function useDownloads(
-  transcription: Transcription,
-  files: { performed: Uint8Array; quantized: Uint8Array },
-  svp: string,
-): Download[] {
-  const [items, setItems] = useState<Download[]>([]);
-  useEffect(() => {
-    const urls: string[] = [];
-    const make = (data: BlobPart, type: string) => {
-      const url = URL.createObjectURL(new Blob([data], { type }));
-      urls.push(url);
-      return url;
-    };
-    setItems([
-      {
-        label: "MIDI (노래한 그대로)",
-        href: make(files.performed as BlobPart, "audio/midi"),
-        filename: "melody-performed.mid",
-      },
-      {
-        label: "MIDI (격자)",
-        href: make(files.quantized as BlobPart, "audio/midi"),
-        filename: "melody-quantized.mid",
-      },
-      {
-        label: "MusicXML (악보)",
-        href: make(
-          transcription.musicXml,
-          "application/vnd.recordare.musicxml+xml",
-        ),
-        filename: "melody.musicxml",
-      },
-      {
-        // 가사가 있어야 가창 합성기가 발음한다(`transcribe.VOCAL_LYRIC`)
-        label: "MusicXML (가사 la · 신스V)",
-        href: make(
-          transcription.vocalXml,
-          "application/vnd.recordare.musicxml+xml",
-        ),
-        filename: "melody-la.musicxml",
-      },
-      {
-        // **음표만 주면 신스V의 AI가 자기 피치 커브를 새로 만들어 붙인다.**
-        // 이 파일에는 원 보컬의 f0가 컨트롤 점으로 들어 있어 비브라토·포르타멘토·
-        // 스쿠핑이 그대로 간다(`core/transcribe/svp.ts`).
-        label: "신스V 프로젝트 (피치 커브 포함)",
-        href: make(svp, "application/octet-stream"),
-        filename: "melody.svp",
-      },
-    ]);
-    return () => {
-      for (const url of urls) URL.revokeObjectURL(url);
-    };
-  }, [files, svp, transcription]);
-  return items;
-}
-
-/** MusicXML → SVG. verovio가 없거나 실패하면 null(화면은 안내로 떨어진다) */
-function useScore(musicXml: string): string | null {
-  const [svg, setSvg] = useState<string | null>(null);
-  useEffect(() => {
-    let alive = true;
-    setSvg(null);
-    ScoreRenderer.load()
-      .then((renderer) => {
-        if (alive) setSvg(renderer.render(musicXml));
-      })
-      .catch(() => {
-        if (alive) setSvg(null);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [musicXml]);
-  return svg;
-}

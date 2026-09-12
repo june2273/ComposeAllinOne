@@ -21,7 +21,18 @@ export interface MidiOptions {
   readonly beatsPerBar?: number;
   /** 트랙 이름 메타. 없으면 넣지 않는다 */
   readonly name?: string;
+  /**
+   * MIDI 채널 0~15. 기본 0.
+   *
+   * **드럼은 9다**(사람이 세는 채널 10). GM에서 그 채널만 음높이가 아니라
+   * 타악기 번호를 뜻하고, 어떤 시퀀서든 그 약속으로 읽는다. 드럼 타점을
+   * 채널 0으로 내보내면 피아노 저음역이 울린다.
+   */
+  readonly channel?: number;
 }
+
+/** GM 드럼 채널. 사람이 세는 10번이 0부터 세면 9다 */
+export const DRUM_CHANNEL = 9;
 
 /** 가변 길이 수량(VLQ). MIDI의 델타타임 표현이다 */
 export function writeVarLen(value: number): number[] {
@@ -90,6 +101,7 @@ function build(events: TickEvent[], options: MidiOptions): Uint8Array {
 function noteEvents(
   notes: readonly { midi: number; velocity: number }[],
   ticks: readonly [number, number][],
+  channel = 0,
 ): TickEvent[] {
   // 못갖춘마디는 칸 번호가 음수다(quantize.ts). MIDI에 음수 틱은 없으므로
   // 전체를 밀어 0에서 시작하게 한다 — 곡의 시작이 어디인지는 악보 쪽이 안다.
@@ -100,8 +112,9 @@ function noteEvents(
     const off = ticks[i][1] - lowest;
     const key = Math.max(0, Math.min(127, Math.round(note.midi)));
     const velocity = Math.max(1, Math.min(127, Math.round(note.velocity)));
-    events.push({ tick: on, order: 1, bytes: [0x90, key, velocity] });
-    events.push({ tick: Math.max(on + 1, off), order: 0, bytes: [0x80, key, 0] });
+    const nibble = channel & 0x0f;
+    events.push({ tick: on, order: 1, bytes: [0x90 | nibble, key, velocity] });
+    events.push({ tick: Math.max(on + 1, off), order: 0, bytes: [0x80 | nibble, key, 0] });
   });
   return events;
 }
@@ -120,7 +133,7 @@ export function fromNotes(
   const ticks = notes.map(
     (n) => [Math.round(n.startSec * perSec), Math.round(n.endSec * perSec)] as [number, number],
   );
-  return build(noteEvents(notes, ticks), options);
+  return build(noteEvents(notes, ticks, options.channel), options);
 }
 
 /** 격자에 스냅한 것. 이쪽이 악보와 같은 시각을 갖는다. */
@@ -133,5 +146,5 @@ export function fromQuantized(
   const ticks = notes.map(
     (n) => [Math.round(n.startStep * perStep), Math.round(n.endStep * perStep)] as [number, number],
   );
-  return build(noteEvents(notes, ticks), options);
+  return build(noteEvents(notes, ticks, options.channel), options);
 }

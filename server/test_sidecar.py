@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import io
 import json
+import statistics
 import sys
 import threading
 import types
@@ -22,6 +23,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from app import beats as beats_mod
 from app import cfp, main, melody
 from app.health import Check
 from app.audio import Audio, gate, highpass, normalize, process_vocal, resample
@@ -182,6 +184,56 @@ def test_restore_undoes_the_half_rate_trick():
     restored = melody.restore_octave_curve(lowered)
     assert restored["f0"] == [440.0] * 4  # ×2 되고, 홀수 프레임은 버려진다
     assert restored["confidence"] == [0.5] * 4
+
+
+def test_restore_drops_notes_above_our_range():
+    """**복원이 음역 밖을 만들면 무성으로 둔다** (실측 2026-08-19).
+
+    `curve_from_prediction`의 자르기는 **모델이 돈 도메인**에서 일어나므로,
+    2패스의 상한(MIDI 96 = 2093Hz)이 복원의 ×2를 거쳐 MIDI 108이 된다.
+    그대로 내보내면 웹이 `midi > MAX_MIDI + 1`로 통째로 버려서 **기준 패스가
+    맞히고 있던 고음이 사라진다** — 되올리려던 것과 정반대다.
+    """
+    top = 440.0 * 2 ** ((melody.MAX_MIDI - 69) / 12)  # 도메인 상한 → 복원하면 MIDI 108
+    fine = 440.0 * 2 ** ((70 - 69) / 12)              # 복원하면 MIDI 82 — 정상
+    lowered = {"hopMs": 10.0, "f0": [top, top, fine, fine], "confidence": [0.9] * 4}
+
+    restored = melody.restore_octave_curve(lowered)
+    assert restored["f0"][0] == 0.0, "MIDI 108이 그대로 나갔다 — 웹이 버릴 값이다"
+    assert restored["confidence"][0] == 0.0, "무성인데 신뢰도가 남으면 분위수를 오염시킨다"
+    assert restored["f0"][1] == pytest.approx(932.33, abs=0.01), "정상 음역까지 지웠다"
+
+
+def test_high_register_does_not_overwrite_with_out_of_range(monkeypatch):
+    """음역 밖 2패스가 **멀쩡한 기준 프레임을 덮어쓰지 않는다.**
+
+    고치기 전에는 기준이 MIDI 69로 맞히고 있는 프레임을 MIDI 108로 바꿔 놓았고,
+    그 프레임은 웹에서 통째로 사라졌다. 세 호출부가 전부
+    `restore_octave_curve`를 거치므로 거기서 막는다.
+    """
+    top = 440.0 * 2 ** ((melody.MAX_MIDI - 69) / 12)
+    fine = 440.0 * 2 ** ((70 - 69) / 12)
+    # **`restore_octave_curve`가 2칸마다 하나를 집는다** — lowered는 두 배 길이로.
+    # 홀수 자리는 버려지므로 아무 값이나 둔다.
+    lowered = {"hopMs": 10.0, "f0": [top, 0.0, fine, 0.0, top, 0.0], "confidence": [0.9] * 6}
+    pitch = {"hopMs": 10.0, "f0": [440.0] * 3, "confidence": [0.9] * 3}
+
+    out, switched = melody.resolve_high_register(pitch, lowered)
+    assert out["f0"][0] == 440.0, "음역 밖 값이 기준을 덮어썼다"
+    assert out["f0"][2] == 440.0
+    assert out["f0"][1] == pytest.approx(932.33, abs=0.01), "정상 고음은 바뀌어야 한다"
+    assert switched == 1
+
+
+def test_octave_candidate_drops_out_of_range(monkeypatch):
+    """후보에도 음역 밖이 실리면 안 된다 — 웹의 `f0Alt` 검사가 또 버린다."""
+    top = 440.0 * 2 ** ((melody.MAX_MIDI - 69) / 12)
+    lowered = {"hopMs": 10.0, "f0": [top, 0.0, top, 0.0], "confidence": [0.9] * 4}
+    # 기준이 그 절반(MIDI 96)이면 옥타브 관계는 성립하지만 후보가 범위 밖이다
+    base = {"hopMs": 10.0, "f0": [top / 2, top / 2], "confidence": [0.5] * 2}
+
+    candidate = melody.octave_candidate(base, lowered)
+    assert candidate["f0"] == [0.0, 0.0], "음역 밖 후보가 실렸다"
 
 
 def test_octave_pass_lifts_a_halved_run():
@@ -505,7 +557,7 @@ def test_probe_reports_every_model_independently():
 
 def test_health_carries_checks(client):
     body = client.get("/health").json()
-    assert set(body["checks"]) == {"stems", "melody", "structure"}
+    assert set(body["checks"]) == {"stems", "melody", "structure", "beats"}
     for check in body["checks"].values():
         assert check["status"] in {"checking", "ok", "unavailable", "broken"}
 
@@ -682,7 +734,7 @@ def client(tmp_path: Path, monkeypatch):
 def test_health_answers_without_loading_models(client):
     body = client.get("/health").json()
     assert body["ok"] is True
-    assert set(body["models"]) == {"stems", "melody", "structure"}
+    assert set(body["models"]) == {"stems", "melody", "structure", "beats"}
 
 
 def test_empty_upload_is_rejected(client):
@@ -944,3 +996,167 @@ def test_audio_name_is_allowlisted(client):
     # 경로 탈출이 되면 안 된다
     assert client.get(f"/jobs/{job_id}/audio/..%2F..%2Fmeta").status_code in {404, 400}
     assert client.get(f"/jobs/{job_id}/audio/meta").status_code == 404
+
+
+# --- 비트 (Beat This!) -------------------------------------------------------
+
+
+def test_refine_period_is_not_the_median():
+    """중앙값을 쓰면 치우친다 — 그것이 이 함수가 세 단계인 이유다.
+
+    비트가 11.6ms 프레임 격자에 묶여 있으면 150BPM(0.4초)에서 0.3947과 0.4064만
+    나올 수 있어 중앙값이 153을 낸다(실측). 그 상황을 그대로 만든다.
+    """
+    step = 1.0 / 86.13  # ODF 프레임 간격
+    beats = [round(i * 0.4 / step) * step for i in range(200)]
+    gaps = [b - a for a, b in zip(beats, beats[1:])]
+    naive = 60.0 / statistics.median(gaps)
+    refined = 60.0 / beats_mod.refine_period(beats)
+    assert abs(naive - 150.0) > 1.0, f"중앙값이 안 치우치면 이 시험이 뜻이 없다 ({naive})"
+    assert abs(refined - 150.0) < 0.2, refined
+
+
+def test_fill_puts_back_a_dropped_beat():
+    """간격이 주기의 두 배면 하나 빠진 것이다 — 곡A의 29초 구간이 그랬다."""
+    beats = [i * 0.5 for i in range(20)]
+    holed = [b for i, b in enumerate(beats) if i not in (7, 12)]
+    filled = beats_mod.fill_dropped_beats(holed)
+    assert len(filled) == len(beats)
+    for got, want in zip(filled, beats):
+        assert abs(got - want) < 1e-9
+
+
+def test_fill_leaves_a_complete_grid_alone():
+    """이미 완전한 격자는 한 개도 안 건드린다(실측: 정답 14곡 중 4곡이 채움 0)."""
+    beats = [i * 0.5 for i in range(40)]
+    assert beats_mod.fill_dropped_beats(beats) == beats
+
+
+def test_fill_does_not_invent_beats_in_a_real_rest():
+    """정수배가 아닌 간격은 손대지 않는다 — 그것이 쉼과 놓친 비트를 가르는 조건이다."""
+    beats = [i * 0.5 for i in range(10)]
+    beats += [beats[-1] + 1.73]           # 3.46박 — 어느 정수배도 아니다
+    beats += [beats[-1] + 0.5 * i for i in range(1, 10)]
+    assert beats_mod.fill_dropped_beats(beats) == beats
+
+
+def test_fill_stops_at_long_gaps():
+    """연속 넷을 넘게 비었으면 놓친 것이 아니라 소리가 없는 것으로 본다."""
+    beats = [i * 0.5 for i in range(10)]
+    beats += [beats[-1] + 0.5 * 6]        # 정확히 6박 — 정수배지만 상한을 넘는다
+    beats += [beats[-1] + 0.5 * i for i in range(1, 10)]
+    assert beats_mod.fill_dropped_beats(beats) == beats
+
+
+def test_beats_per_bar_survives_one_slipped_bar():
+    """최빈값이라 도입부의 어긋난 마디 하나가 답을 못 바꾼다(평균이면 3.5가 된다)."""
+    beats = [i * 0.5 for i in range(41)]
+    downbeats = [0.0, 1.0]                # 첫 마디만 2박
+    downbeats += [1.0 + 2.0 * i for i in range(1, 10)]   # 나머지는 4박
+    assert beats_mod.beats_per_bar(beats, downbeats) == 4
+
+
+def test_beats_per_bar_reads_three_four():
+    """유일한 3/4 곡(곡J)을 3으로 낸다 — 실측으로도 그렇다."""
+    beats = [i * 0.3 for i in range(60)]
+    downbeats = [i * 0.9 for i in range(20)]
+    assert beats_mod.beats_per_bar(beats, downbeats) == 3
+
+
+def test_beats_cache_ignores_another_engine(tmp_path: Path):
+    """엔진이 다르면 없는 것으로 친다 — 무효화가 이 파일 하나에서 끝난다."""
+    beats_mod.write({"engine": beats_mod.ENGINE, "bpm": 120.0}, tmp_path)
+    assert beats_mod.read(tmp_path) is not None
+    beats_mod.write({"engine": "beatthis-old", "bpm": 120.0}, tmp_path)
+    assert beats_mod.read(tmp_path) is None
+
+
+def test_beats_cache_survives_a_broken_file(tmp_path: Path):
+    """반쯤 쓰이다 만 JSON이 서버를 죽이면 안 된다 — 그 곡만 다시 재면 된다."""
+    (tmp_path / "beats.json").write_text('{"engine": "beat', encoding="utf-8")
+    assert beats_mod.read(tmp_path) is None
+
+
+def test_beats_selftest_does_not_build_the_tracker(monkeypatch):
+    """자가진단이 체크포인트 77MB를 받으면 안 된다 — import까지만 본다."""
+    import sys as _sys
+    import types as _types
+
+    def explode(*_a, **_k):
+        pytest.fail("자가진단이 File2Beats를 만들었다 — 가중치를 받게 된다")
+
+    fake = _types.ModuleType("beat_this.inference")
+    fake.File2Beats = explode
+    monkeypatch.setitem(_sys.modules, "beat_this", _types.ModuleType("beat_this"))
+    monkeypatch.setitem(_sys.modules, "beat_this.inference", fake)
+    beats_mod.selftest()
+
+
+def test_beats_endpoint_is_503_when_the_model_is_missing(client, monkeypatch):
+    """설치 문제를 4xx로 내면 웹이 '이 파일이 문제'로 읽는다."""
+    monkeypatch.setattr(main.probe, "get", lambda name: Check("unavailable", "없다"))
+    response = client.post("/beats", files={"file": ("a.wav", wav_bytes(), "audio/wav")})
+    assert response.status_code == 503
+
+
+def test_beats_endpoint_rejects_an_empty_file(client):
+    response = client.post("/beats", files={"file": ("a.wav", b"", "audio/wav")})
+    assert response.status_code == 400
+
+
+def test_beats_endpoint_returns_the_cache_without_running_the_model(
+    client, monkeypatch, tmp_path: Path
+):
+    """캐시가 있으면 모델을 안 부른다. 곡당 2~4초라도 열 때마다 치를 값은 아니다."""
+    monkeypatch.setattr(main.probe, "get", lambda name: Check("ok"))
+    data = wav_bytes()
+    out_dir = main.store.slot(digest_of(data))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    beats_mod.write(
+        {"engine": beats_mod.ENGINE, "bpm": 120.0, "beatsPerBar": 4,
+         "beats": [0.0, 0.5], "downbeats": [0.0]},
+        out_dir,
+    )
+    monkeypatch.setattr(
+        beats_mod, "analyze",
+        lambda *_a, **_k: pytest.fail("캐시가 있는데 모델을 불렀다"),
+    )
+    body = client.post("/beats", files={"file": ("a.wav", data, "audio/wav")}).json()
+    assert body["cached"] is True
+    assert body["bpm"] == 120.0
+
+
+def test_beats_endpoint_writes_what_it_computed(client, monkeypatch):
+    """계산한 결과가 슬롯에 남아야 다음 열기가 싸다."""
+    monkeypatch.setattr(main.probe, "get", lambda name: Check("ok"))
+    result = {"engine": beats_mod.ENGINE, "bpm": 84.0, "beatsPerBar": 4,
+              "beats": [0.0, 0.71], "downbeats": [0.0]}
+    monkeypatch.setattr(beats_mod, "analyze", lambda *_a, **_k: result)
+    data = wav_bytes()
+    body = client.post("/beats", files={"file": ("a.wav", data, "audio/wav")}).json()
+    assert body["cached"] is False and body["bpm"] == 84.0
+    assert beats_mod.read(main.store.slot(digest_of(data))) == result
+
+
+def test_beats_endpoint_does_not_clobber_an_input_being_separated(client, monkeypatch):
+    """같은 슬롯을 `/jobs`가 쓰고 있을 수 있다 — 입력을 겹쳐 쓰면 분리가 깨진다."""
+    SEPARATING = "분리 중이던 것".encode("utf-8")
+    monkeypatch.setattr(main.probe, "get", lambda name: Check("ok"))
+    monkeypatch.setattr(
+        beats_mod, "analyze",
+        lambda *_a, **_k: {"engine": beats_mod.ENGINE, "bpm": 84.0,
+                           "beatsPerBar": 4, "beats": [], "downbeats": []},
+    )
+    data = wav_bytes()
+    out_dir = main.store.slot(digest_of(data))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "input.wav").write_bytes(SEPARATING)
+    client.post("/beats", files={"file": ("a.wav", data, "audio/wav")})
+    assert (out_dir / "input.wav").read_bytes() == SEPARATING
+
+
+def test_health_reports_the_beat_tracker(client):
+    """웹이 이걸 보고 분석 콘솔을 열지 잠글지 정한다."""
+    body = client.get("/health").json()
+    assert "beats" in body["models"]
+    assert "beats" in body["checks"]

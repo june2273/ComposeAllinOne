@@ -5,21 +5,28 @@
  * 화면에서 답을 만드는 스테이지는 `onAnswer`로 응답을 올려보낸다.
  * `stageFor()`에 분기 한 줄을 더하면 새 스테이지가 붙는다.
  *
- * ## 음정 3단계
+ * ## 음정 — 화면 넷
  *
- * 한 과목을 세 단계로 쪼갠 것이라 화면도 셋이다. 문제(두 자연음)는 같고
- * **무엇을 묻고 무엇으로 답하는가**만 다르다.
+ * 앞의 셋은 한 과목을 단계로 쪼갠 것이라 문제(두 음)가 같고 **무엇을 묻는가**만
+ * 다르다. 음정을 구하는 순서의 세 토막이다(theory의 `diatonicHalfSteps` 주석
+ * 참조) — 연습 1이 ②, 연습 2가 ②+④, 본 단계가 전부다.
  *
- * | 스테이지 | 묻는 것 | 입력 | 제출 |
- * |---|---|---|---|
- * | `IntervalCountStage` | 도수 + 반음 개수 | 숫자 키 | Enter |
- * | `IntervalTableStage` | 성질 | 버튼(마우스)·글자 키 | 고르는 즉시 |
- * | `IntervalStage` | 도수 + 성질 | 숫자 키 + 버튼 | 둘 다 차면 |
+ * | 스테이지 | 묻는 것 | 입력 |
+ * |---|---|---|
+ * | `IntervalCountStage` | 도수 + 반음 개수 (골격) | 숫자 키 |
+ * | `IntervalTableStage` | 성질 | 타이핑 |
+ * | `IntervalStage` | 성질 + 도수 | 타이핑 |
+ * | `IntervalBuildStage` | **나머지 음** | **건반** |
  *
- * 제출 규칙이 스테이지마다 다른 것은 의도다. **여러 자리 숫자를 받는 칸이
- * 있으면 "칸이 다 차면 제출"을 쓸 수 없다** — 반음 개수 12를 치려고 1을 누른
- * 순간 제출된다. 지금은 도수도 반음 개수도 한 자리라 그 함정이 없지만,
- * 연습 1만은 오타를 고칠 여지를 두려고 Enter를 남겼다.
+ * 넷째(음정 해석)만 방향이 반대다 — 음정을 읽는 대신 만든다. 그래서 답도
+ * 글자가 아니라 건반으로 받는다.
+ *
+ * **글자로 답하는 셋은 제출이 전부 Enter다.** 예전에는 "칸이 다 차면 제출"을 쓰는 화면이 있었는데,
+ * 겹음정에서 도수가 두 자리가 되는 순간 그 규칙이 깨진다 — 13을 치려고 1을
+ * 누르면 그때 제출된다. 규칙을 하나로 모았다.
+ *
+ * **성질은 버튼이 아니라 글자로 받는다.** 겹증·겹감·겹겹증까지 아홉이라 버튼으로는
+ * 줄이 넘치고, 무엇보다 실제로 답을 적을 때 쓰는 형식이 "증5"다.
  */
 
 import {
@@ -28,32 +35,26 @@ import {
   useCallback,
   useEffect,
   useReducer,
+  useState,
 } from "react";
 
 import { Stage } from "../core/config";
 import {
   type CountResponse,
+  type IntervalBuildQuestion,
   type IntervalQuestion,
   type IntervalResponse,
   type QualityResponse,
   type Question,
+  isIntervalBuildQuestion,
   isIntervalQuestion,
 } from "../core/questions";
 import {
-  AUGMENTED,
-  DIMINISHED,
-  MAJOR,
-  MINOR,
-  PERFECT,
+  type IntervalAnswer,
+  parseIntervalAnswer,
+  qualityLadder,
 } from "../core/theory";
-import {
-  ChoiceRow,
-  Hint,
-  KeyCaps,
-  Matrix,
-  type MatrixProps,
-  NumberField,
-} from "../ds";
+import { Hint, Matrix, type MatrixProps, NumberField, TextField } from "../ds";
 import { Staff } from "./components";
 
 export interface StageProps {
@@ -62,35 +63,12 @@ export interface StageProps {
   locked: boolean;
   /** 참고표를 함께 띄운다 (옵션에서 켠다) */
   showTable?: boolean;
+  /** 도수 상한. 두 자리가 될 수 있는지를 이 값이 정한다 */
+  maxNumber?: number;
+  /** 음 하나에 붙은 임시표 수의 상한. 사다리 표의 폭을 정한다 */
+  maxAlter?: number;
   onAnswer: (response: unknown) => void;
 }
-
-/**
- * 성질 다섯 가지 — 답으로 올라가는 값(`quality`), 원어 이름, 자판 단축키.
- *
- * 단축키에 알파벳을 쓰는 것은 한글 입력기가 켜져 있어도 눌리기 때문이다.
- * Perfect / Major / miNor / Augmented / Diminished.
- *
- * **단(minor)이 N인 것은 M을 장(Major)이 먼저 가져갔기 때문이다.** 교재
- * 표기로는 m이지만 대소문자로 가르면 Shift 여부가 정답을 바꾸게 된다. 그래서
- * 화면이 `N — 단`을 키캡으로 늘 함께 보인다(아래 `QualityPicker`).
- */
-export const QUALITIES: ReadonlyArray<{
-  readonly quality: string;
-  readonly label: string;
-  readonly key: string;
-}> = [
-  { quality: PERFECT, label: "Perfect", key: "P" },
-  { quality: MAJOR, label: "Major", key: "M" },
-  { quality: MINOR, label: "minor", key: "N" },
-  { quality: AUGMENTED, label: "aug", key: "A" },
-  { quality: DIMINISHED, label: "dim", key: "D" },
-];
-
-const QUALITY_CHOICES = QUALITIES.map(
-  ({ quality, label }) => [quality, label] as const,
-);
-const QUALITY_CAPS = QUALITIES.map(({ key, quality }) => [key, quality] as const);
 
 // --- 온음계적 음정표 (교재 unit 03) --------------------------------------------
 //
@@ -129,61 +107,100 @@ export function IntervalTables() {
   );
 }
 
+/**
+ * 교재 A표·B표 — 성질 사다리. 임시표가 붙은 문제에서 위 교차표 다음에 쓴다.
+ *
+ * **여기 적힌 이름은 `theory.qualityLadder()`가 준 것이다.** 위 교차표처럼 손으로
+ * 옮기면 채점과 갈릴 수 있는데, 사다리는 `intervalBetween()`이 성질을 정할 때 쓰는
+ * 바로 그 배열이라 갈릴 자리가 없다.
+ */
+export function LadderTables({ maxAlter = 1 }: { maxAlter?: number }) {
+  return (
+    <div className="tables">
+      <Matrix
+        caption="A표 [1 · 4 · 5 · 8]도 — 오른쪽으로 갈수록 넓다"
+        columns={qualityLadder(1, maxAlter)}
+        rows={[]}
+      />
+      <Matrix
+        caption="B표 [2 · 3 · 6 · 7]도 — 오른쪽으로 갈수록 넓다"
+        columns={qualityLadder(2, maxAlter)}
+        rows={[]}
+      />
+    </div>
+  );
+}
+
 /** MIDI 건반으로 답하는 스테이지. 화면에 낼 것이 없다. */
 export function MidiStage(_: StageProps) {
   return null;
 }
 
-// --- 세 음정 스테이지가 공유하는 부분 --------------------------------------------
+// --- 글자로 답하는 세 스테이지가 공유하는 부분 --------------------------------------------
 
 const DIGIT = /^[0-9]$/u;
 const ERASE = ["Backspace", "Delete"];
 const MOVE = ["Tab", "ArrowLeft", "ArrowRight"];
 
-/** 눌린 키가 성질 단축키면 그 성질. 대소문자를 가리지 않는다. */
-function qualityForKey(key: string): string | undefined {
-  const upper = key.toUpperCase();
-  return QUALITIES.find((q) => q.key === upper)?.quality;
-}
-
-/** 그 성질의 단축키 글자. 키캡을 어디에 불 켤지 정한다. */
-function keyForQuality(quality: string | null): string | null {
-  return QUALITIES.find((q) => q.quality === quality)?.key ?? null;
-}
+const BOTH_HINT = "예: 장3 · 증5 · 겹감7 — 도는 생략. M3 · A5 · DD7로도 친다";
+const QUALITY_HINT = "예: 장 · 증 · 겹감 — M · A · DD로도 친다";
 
 /**
- * 성질 고르기 — 선택지 버튼 + 그 아래 자판 안내.
+ * 성질(과 도수)을 글자로 받는 칸.
  *
- * 두 줄이 같은 `onPick`으로 모이므로 **마우스와 자판이 같은 동작**이다.
- * 키캡을 눌러도 되고 실제 키를 눌러도 된다.
+ * 버튼을 쓰지 않는 이유는 개수가 아니라 **형식**이다. 음정의 이름은 "증5도"
+ * 한 덩어리이고, 답을 그 모양 그대로 적게 하는 편이 성질과 도수를 따로 고르게
+ * 하는 것보다 실제로 하는 일에 가깝다.
+ *
+ * 틀린 형식은 **제출하지 않고 그 자리에서 알려준다.** 오답으로 넘겨 버리면
+ * 음정을 몰라서 틀린 것과 오타를 구별할 수 없다.
  */
-function QualityPicker({
-  selected,
-  disabled,
-  onPick,
+function TypedAnswer({
+  question,
+  locked,
+  needNumber,
+  onDone,
 }: {
-  selected?: string | null;
-  disabled?: boolean;
-  onPick: (quality: string) => void;
+  question: IntervalQuestion;
+  locked: boolean;
+  /** 도수까지 받는가. 연습 2는 성질만 묻는다 */
+  needNumber: boolean;
+  onDone: (answer: IntervalAnswer) => void;
 }) {
+  const [text, setText] = useState("");
+  const [error, setError] = useState("");
+  const key = question.answerText;
+
+  useEffect(() => {
+    setText("");
+    setError("");
+  }, [key]);
+
+  const format = needNumber ? BOTH_HINT : QUALITY_HINT;
   return (
-    <div className="answer">
-      <ChoiceRow
-        choices={QUALITY_CHOICES}
-        selected={selected}
-        disabled={disabled}
-        onPick={onPick}
-      />
-      <KeyCaps
-        keys={QUALITY_CAPS}
-        active={keyForQuality(selected ?? null)}
-        disabled={disabled}
-        onPress={(key) => {
-          const quality = qualityForKey(key);
-          if (quality) onPick(quality);
-        }}
-      />
-    </div>
+    <TextField
+      value={text}
+      placeholder={needNumber ? "증5" : "증"}
+      hint={locked ? "" : error || format}
+      disabled={locked}
+      focusKey={key}
+      onChange={(value) => {
+        setText(value);
+        setError("");
+      }}
+      onSubmit={() => {
+        const answer = parseIntervalAnswer(text);
+        if (!answer) {
+          setError(`알 수 없는 답입니다. ${format}`);
+          return;
+        }
+        if (needNumber && answer.number === null) {
+          setError(`도수까지 적으세요. ${format}`);
+          return;
+        }
+        onDone(answer);
+      }}
+    />
   );
 }
 
@@ -254,12 +271,13 @@ interface CountState {
 
 type CountAction =
   | { type: "reset" }
-  | { type: "digit"; digit: number }
+  | { type: "digit"; digit: number; maxNumber: number }
   | { type: "back" }
   | { type: "toggleField" }
   | { type: "submit" };
 
 const COUNT_FIRST_HINT = "도수를 세어 숫자 키로 입력하세요";
+const COUNT_SECOND_HINT = "반음(미–파·시–도)이 몇 개인지 입력하세요. 임시표는 무시한다";
 const EMPTY_COUNT: CountState = {
   number: null,
   halfSteps: null,
@@ -281,18 +299,27 @@ function reduceCount(state: CountState, action: CountAction): CountState {
     case "reset":
       return EMPTY_COUNT;
 
-    case "digit":
-      if (state.field === 0) {
-        if (action.digit < 1) return { ...state, hint: "도수는 1~9입니다" };
-        return {
-          ...state,
-          number: action.digit,
-          field: 1,
-          hint: "반음(미–파·시–도)이 몇 개인지 입력하세요",
-        };
+    case "digit": {
+      if (state.field === 1) {
+        // 반음 개수는 한 자리다(13도라도 최대 4개). 덧쓰기로 둔다.
+        return { ...state, halfSteps: action.digit, hint: "Enter로 제출합니다" };
       }
-      // 반음 개수는 한 자리다(홑음정에서 최대 2개). 덧쓰기로 둔다.
-      return { ...state, halfSteps: action.digit, hint: "Enter로 제출합니다" };
+      if (state.number === null && action.digit < 1) {
+        return { ...state, hint: "도수는 1부터입니다" };
+      }
+      const grown =
+        state.number === null ? action.digit : state.number * 10 + action.digit;
+      const number = grown <= action.maxNumber ? grown : action.digit;
+      /*
+        **더 이어 붙일 수 없을 때 넘어간다.** 상한이 8이면 어느 숫자를 쳐도 곧장
+        반음 칸으로 가고(예전과 같다), 겹음정이라 상한이 13이면 1에서만 기다린다.
+        규칙 하나로 두 경우가 다 맞는다 — 옵션마다 분기를 두면 13을 치려다 1에서
+        칸이 넘어가는 사고가 한쪽에 남는다.
+      */
+      return number * 10 > action.maxNumber
+        ? { ...state, number, field: 1, hint: COUNT_SECOND_HINT }
+        : { ...state, number, hint: "도수를 마저 치거나 Tab으로 넘어가세요" };
+    }
 
     case "back":
       if (state.field === 1 && state.halfSteps !== null) {
@@ -316,8 +343,14 @@ function reduceCount(state: CountState, action: CountAction): CountState {
  * 연습 1 — 두 음이 몇 도이고 반음이 몇 개인지 센다.
  *
  * 성질은 묻지 않는다. 표를 외우기 전에 **세는 법**만 몸에 익히는 단계다.
+ * 임시표가 붙어 있어도 세는 것은 음이름 사다리뿐이다 — E♭4–F4도 2도·반음 1개다.
  */
-export function IntervalCountStage({ question, locked, onAnswer }: StageProps) {
+export function IntervalCountStage({
+  question,
+  locked,
+  maxNumber = 8,
+  onAnswer,
+}: StageProps) {
   const [input, dispatch] = useReducer(reduceCount, EMPTY_COUNT);
   useResetOnQuestion(question, dispatch);
 
@@ -342,14 +375,18 @@ export function IntervalCountStage({ question, locked, onAnswer }: StageProps) {
 
   useKeys(
     locked,
-    useCallback(({ key }: KeyboardEvent) => {
-      if (key === "Enter") dispatch({ type: "submit" });
-      else if (DIGIT.test(key)) dispatch({ type: "digit", digit: Number(key) });
-      else if (ERASE.includes(key)) dispatch({ type: "back" });
-      else if (MOVE.includes(key)) dispatch({ type: "toggleField" });
-      else return false;
-      return true;
-    }, []),
+    useCallback(
+      ({ key }: KeyboardEvent) => {
+        if (key === "Enter") dispatch({ type: "submit" });
+        else if (DIGIT.test(key)) {
+          dispatch({ type: "digit", digit: Number(key), maxNumber });
+        } else if (ERASE.includes(key)) dispatch({ type: "back" });
+        else if (MOVE.includes(key)) dispatch({ type: "toggleField" });
+        else return false;
+        return true;
+      },
+      [maxNumber],
+    ),
   );
 
   if (!isIntervalQuestion(question)) return null;
@@ -373,32 +410,23 @@ export function IntervalCountStage({ question, locked, onAnswer }: StageProps) {
 /**
  * 연습 2 — 도수와 반음 개수를 **주고** 성질만 묻는다.
  *
- * 계산을 빼고 표만 남긴 단계다. 옵션에서 표 보기를 켜면 보면서 풀 수 있다 —
- * 처음에는 보고 고르다가, 익으면 끄는 것이 이 스테이지의 쓰임새다.
+ * 세는 것을 빼고 표만 남긴 단계다. 온음계에서는 교차표 한 번으로 끝나지만,
+ * 임시표가 붙으면 그 표가 주는 것은 **골격**이고 A·B 사다리를 한 번 더 거쳐야
+ * 답이 된다 — C4–G♯4는 `5도 · 반음 1개`(완전5도)에서 한 칸 옮겨 증5도다.
+ * 그래서 임시표가 있으면 표를 두 벌 보인다.
  */
 export function IntervalTableStage({
   question,
   locked,
   showTable,
+  maxAlter = 0,
   onAnswer,
 }: StageProps) {
-  const choose = useCallback(
-    (quality: string) => {
-      onAnswer({ form: "quality", quality } satisfies QualityResponse);
+  const done = useCallback(
+    (answer: IntervalAnswer) => {
+      onAnswer({ form: "quality", quality: answer.quality } satisfies QualityResponse);
     },
     [onAnswer],
-  );
-
-  useKeys(
-    locked,
-    useCallback(
-      ({ key }: KeyboardEvent) => {
-        const quality = qualityForKey(key);
-        if (quality) choose(quality);
-        return quality !== undefined;
-      },
-      [choose],
-    ),
   );
 
   if (!isIntervalQuestion(question)) return null;
@@ -406,13 +434,23 @@ export function IntervalTableStage({
   return (
     <IntervalFrame
       question={question}
-      hint={locked ? "" : "표에서 성질을 찾아 고르세요"}
+      hint={locked ? "" : "성질을 적고 Enter"}
     >
       <p className="given">
         {question.interval.number}도 · 반음 {question.halfSteps}개
       </p>
-      <QualityPicker disabled={locked} onPick={choose} />
-      {showTable && <IntervalTables />}
+      <TypedAnswer
+        question={question}
+        locked={locked}
+        needNumber={false}
+        onDone={done}
+      />
+      {showTable && (
+        <>
+          <IntervalTables />
+          {maxAlter > 0 && <LadderTables maxAlter={maxAlter} />}
+        </>
+      )}
     </IntervalFrame>
   );
 }
@@ -420,67 +458,21 @@ export function IntervalTableStage({
 // --- 본 단계: 음정 구분 ---------------------------------------------------------
 
 /**
- * 본 단계 — 두 음만 보고 성질과 도수를 답한다.
+ * 본 단계 — 두 음만 보고 음정 이름을 적는다.
  *
  * 반음 개수는 입력하지 않는다. 세는 것은 머릿속에서 끝내야 하고, 화면에
  * 적게 하면 연습 1로 되돌아가는 셈이 된다.
- *
- * 순서를 강제하지 않는 것도 의도다 — 성질을 먼저 고르든 도수를 먼저 치든
- * **둘이 다 차는 순간 제출된다.** 둘 다 한 번의 동작이라(클릭 하나, 숫자 하나)
- * 여러 자리 입력이 중간에 잘리는 문제가 없다.
  */
-interface PickState {
-  number: number | null;
-  quality: string | null;
-}
-
-type PickAction =
-  | { type: "reset" }
-  | { type: "digit"; digit: number }
-  | { type: "quality"; quality: string };
-
-const EMPTY_PICK: PickState = { number: null, quality: null };
-
-function reducePick(state: PickState, action: PickAction): PickState {
-  switch (action.type) {
-    case "reset":
-      return EMPTY_PICK;
-    case "digit":
-      return action.digit < 1 ? state : { ...state, number: action.digit };
-    case "quality":
-      return { ...state, quality: action.quality };
-  }
-}
-
 export function IntervalStage({ question, locked, onAnswer }: StageProps) {
-  const [input, dispatch] = useReducer(reducePick, EMPTY_PICK);
-  useResetOnQuestion(question, dispatch);
-
-  // 연습 1과 같은 이유로 제출을 이펙트에 둔다 — 두 입력이 한 태스크에 묶여도
-  // 리듀서를 거친 최신 상태만 보고 판단한다.
-  useEffect(() => {
-    if (locked || input.number === null || input.quality === null) return;
-    onAnswer({
-      form: "interval",
-      number: input.number,
-      quality: input.quality,
-    } satisfies IntervalResponse);
-  }, [input.number, input.quality, locked, onAnswer]);
-
-  const choose = useCallback((quality: string) => {
-    dispatch({ type: "quality", quality });
-  }, []);
-
-  useKeys(
-    locked,
-    useCallback(({ key }: KeyboardEvent) => {
-      const quality = qualityForKey(key);
-      if (quality) dispatch({ type: "quality", quality });
-      else if (DIGIT.test(key)) dispatch({ type: "digit", digit: Number(key) });
-      else if (ERASE.includes(key)) dispatch({ type: "reset" });
-      else return false;
-      return true;
-    }, []),
+  const done = useCallback(
+    (answer: IntervalAnswer) => {
+      onAnswer({
+        form: "interval",
+        number: answer.number,
+        quality: answer.quality,
+      } satisfies IntervalResponse);
+    },
+    [onAnswer],
   );
 
   if (!isIntervalQuestion(question)) return null;
@@ -488,34 +480,41 @@ export function IntervalStage({ question, locked, onAnswer }: StageProps) {
   return (
     <IntervalFrame
       question={question}
-      hint={
-        locked
-          ? ""
-          : input.quality === null
-            ? "성질을 고르세요"
-            : "도수를 숫자 키로 입력하세요"
-      }
+      hint={locked ? "" : "음정 이름을 적고 Enter"}
     >
-      {/*
-        **성질이 먼저다.** 음정의 이름은 "장3도"지 "3도 장"이 아니다 —
-        `Interval.name`도 `responseText`도 그 순서로 적으므로, 입력 칸만 반대면
-        답을 만드는 동안 본 것과 채점 결과에 적힌 것이 뒤집혀 보인다.
-        (고르는 순서는 여전히 자유다. 보이는 순서만 고정한 것이다.)
-      */}
-      <div className="interval__fields">
-        <span
-          className={`field field--text${input.quality ? "" : " field--empty field--active"}`}
-        >
-          {input.quality ?? "–"}
-        </span>
-        <NumberField value={input.number} active={input.number === null} unit="도" />
-      </div>
-      <QualityPicker
-        selected={input.quality}
-        disabled={locked}
-        onPick={choose}
+      <TypedAnswer
+        question={question}
+        locked={locked}
+        needNumber
+        onDone={done}
       />
     </IntervalFrame>
+  );
+}
+
+// --- 음정 해석: 음을 쌓는다 ------------------------------------------------------
+
+/**
+ * 음정 해석 — 음 하나와 음정을 주고 **나머지 음을 건반에서** 받는다.
+ *
+ * 앞의 셋과 방향이 반대다. `G4 · 장2도 · 위로`면 A4를 누르는 것이 정답이고,
+ * `아래로`면 F4다. 위·아래가 섞여 나오므로 방향을 먼저 읽어야 한다.
+ *
+ * **이 화면에는 입력이 없다.** 답은 `QuizPage`가 건반(MIDI·자판·가상 건반)에서
+ * 받아 `Session.collect()`로 넣는다 — 청음과 완전히 같은 경로라 락아웃 규칙이
+ * 그대로 걸린다.
+ */
+export function IntervalBuildStage({ question, locked }: StageProps) {
+  if (!isIntervalBuildQuestion(question)) return null;
+  const q: IntervalBuildQuestion = question;
+  return (
+    <div className="stack">
+      <Staff lower={q.given} />
+      <p className="given">
+        {q.given.name} · {q.interval.name} · {q.up ? "위로" : "아래로"}
+      </p>
+      <Hint>{locked ? "" : "건반에서 나머지 음을 누르세요"}</Hint>
+    </div>
   );
 }
 
@@ -525,6 +524,7 @@ const STAGE_VIEWS: Partial<
   [Stage.IntervalCount]: IntervalCountStage,
   [Stage.IntervalTable]: IntervalTableStage,
   [Stage.IntervalId]: IntervalStage,
+  [Stage.IntervalBuild]: IntervalBuildStage,
 };
 
 export function stageFor(stage: Stage) {
@@ -534,13 +534,23 @@ export function stageFor(stage: Stage) {
 /**
  * 이 스테이지가 건반으로 답하는가.
  *
- * MIDI 입력과 자판 폴백이 **같은 조건**을 봐야 한다. 음정 스테이지는 숫자·성질
+ * MIDI 입력과 자판 폴백이 **같은 조건**을 봐야 한다. 음정 세 단계는 숫자·성질
  * 키를 쓰므로 자판 폴백이 꺼져 있는데, 거기서 MIDI만 살아 있으면 건반을 누르는
  * 순간 엉뚱한 응답이 `Session.collect()`로 들어간다 — 채점기가 기대하는 것은
  * 화면 응답인데 MIDI 번호 배열이 오게 된다. 조건을 한 곳에 둔다.
+ *
+ * **"화면이 있는가"로 판정하지 않는다.** 예전에는 `STAGE_VIEWS`에 없는 것을
+ * 건반 스테이지로 봤는데, 음정 해석이 화면과 건반을 **둘 다** 쓰면서 그 규칙이
+ * 깨졌다(그대로 두면 그 스테이지에서 건반이 통째로 죽는다).
  */
+const KEYBOARD_STAGES: ReadonlySet<Stage> = new Set([
+  Stage.EarSingle,
+  Stage.EarChord,
+  Stage.IntervalBuild,
+]);
+
 export function usesMidiInput(stage: Stage): boolean {
-  return !(stage in STAGE_VIEWS);
+  return KEYBOARD_STAGES.has(stage);
 }
 
 /** 이 스테이지에 참고표가 있는가. 옵션 화면이 "표 보기"를 낼지 정한다. */

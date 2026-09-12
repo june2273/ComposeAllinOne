@@ -17,6 +17,7 @@ import {
   sectionsFromSegments,
   type AnalysisProgress,
   type AnalysisReport,
+  type BeatGrid,
 } from "../core/analysis";
 import {
   Button,
@@ -30,9 +31,11 @@ import {
   SpecSection,
   Stack,
 } from "../ds";
+import { type AudioBackend, NullSynth } from "../core/audio";
 import { analyzeFile } from "../platform/analyze";
-import type { SidecarStructure } from "../platform/sidecar";
+import { fetchBeats, type SidecarStructure } from "../platform/sidecar";
 import { ChordCard } from "./chords";
+import { clock } from "./format";
 import { StructureCard } from "./structure";
 import {
   TranscriptionPanel,
@@ -55,10 +58,6 @@ type State =
   | { name: "done"; file: File; report: AnalysisReport }
   | { name: "error"; file: string; message: string };
 
-function seconds(value: number): string {
-  const minutes = Math.floor(value / 60);
-  return `${minutes}:${String(Math.floor(value % 60)).padStart(2, "0")}`;
-}
 
 /** 정수배 후보는 신뢰도가 아니라 **읽는 방식**의 문제다. 함께 보여준다. */
 function tempoDetail(report: AnalysisReport): string {
@@ -70,6 +69,12 @@ function tempoDetail(report: AnalysisReport): string {
   if (others.length) parts.push(`다른 읽기 ${others.join(" · ")}`);
   return parts.join(" · ");
 }
+
+/*
+ * **`tempoWarning`이 2026-09-12에 사라졌다.** 축 B의 2박 신고(`meter.halfTempo`)를
+ * BPM 칸 경고로 돌리던 줄인데, 축 B가 없어져 신고 자체가 안 나온다.
+ * 사람이 배수를 고치는 길은 그대로 남아 있다 — 아래 후보 막대를 누르면 된다.
+ */
 
 function meterDetail(report: AnalysisReport): string {
   const parts = [accentPattern(report.meter.beatsPerBar), `${report.downbeats.length}마디`];
@@ -87,6 +92,9 @@ function keyDetail(report: AnalysisReport): string {
   return parts.join(" · ");
 }
 
+/** 오디오 백엔드를 안 받았을 때. 소리만 안 날 뿐 화면은 그대로 돈다 */
+const SILENT = new NullSynth();
+
 /** 신뢰도가 낮으면 확정처럼 보이지 않게 한다(사양서 §6). */
 function note(confidence: number): string | undefined {
   return confidenceTier(confidence) === "low" ? "확인 필요" : undefined;
@@ -94,10 +102,19 @@ function note(confidence: number): string | undefined {
 
 export function AnalysisPage({
   analyze = analyzeFile,
+  beats = fetchBeats,
+  audio = SILENT,
   transcription,
 }: {
   /** 테스트가 가짜 분석기를 넣는 자리. 앱에서는 넘기지 않는다 */
   analyze?: typeof analyzeFile;
+  /** 테스트가 가짜 격자를 넣는 자리. 앱에서는 넘기지 않는다 */
+  beats?: typeof fetchBeats;
+  /**
+   * 악보 재생용. **모듈 상수를 기본값으로 둔다** — `new NullSynth()`를 여기
+   * 적으면 렌더마다 새 객체가 생겨 아래 트리가 매번 갱신된다.
+   */
+  audio?: AudioBackend;
   /** 테스트가 가짜 사이드카를 넣는 자리 */
   transcription?: Partial<TranscriptionPanelProps>;
 }) {
@@ -133,11 +150,11 @@ export function AnalysisPage({
    * 진행률 화면으로, 재분석은 옛 결과를 보여준 채로.
    */
   const runAnalysis = useCallback(
-    (file: File, forceBpm?: number) => {
+    (file: File, ratio?: number) => {
       running.current?.abort();
       const controller = new AbortController();
       running.current = controller;
-      if (forceBpm === undefined) {
+      if (ratio === undefined) {
         // 새 파일이다 — 이전 재분석의 진행률이 남아 있었다면 지운다
         setReanalyzing(null);
         // 구조도 함께 지운다. 사이드카는 이 파일에 대해 아직 돌지도 않았다
@@ -150,10 +167,13 @@ export function AnalysisPage({
       } else {
         setReanalyzing({ stage: "다시 분석", ratio: 0 });
       }
-      analyze(
+      // **격자를 먼저 받는다.** 워커에는 네트워크가 없어서 거기서 못 부른다.
+      // 배수를 고치는 경로(`ratio`)에서도 다시 받는데, 캐시 적중이라 즉시 온다.
+      const withGrid = (grid: BeatGrid) => analyze(
         file,
+        grid,
         (progress) => {
-          if (forceBpm === undefined) {
+          if (ratio === undefined) {
             // 늦게 도착한 진행률이 결과 화면을 되돌리지 않게 한다
             setState((current) =>
               current.name === "running" && current.file === file.name
@@ -166,8 +186,24 @@ export function AnalysisPage({
         },
         undefined,
         controller.signal,
-        forceBpm,
-      ).then(
+        ratio,
+      );
+
+      beats(file, undefined, controller.signal)
+        .catch((error: unknown) => {
+          // **여기가 사이드카 없는 환경이 부딪히는 첫 벽이다.** 날것의 fetch
+          // 오류를 그대로 내보내면 "Failed to fetch"만 보이고 무엇을 해야
+          // 하는지가 안 나온다. 서버가 낸 문장이 있으면 그것을 살린다.
+          const said = error instanceof Error ? error.message : String(error);
+          throw new Error(
+            said.includes("fetch") || said.includes("NetworkError")
+              ? "분석 서버(사이드카)가 꺼져 있다 — 비트·BPM·박자가 거기서 나온다. " +
+                "`cd server && .venv/bin/uvicorn app.main:app --port 8420`"
+              : said,
+          );
+        })
+        .then(withGrid)
+        .then(
         (report) => {
           if (controller.signal.aborted) return;
           setReanalyzing(null);
@@ -185,7 +221,7 @@ export function AnalysisPage({
         },
       );
     },
-    [analyze],
+    [analyze, beats],
   );
 
   const onFile = useCallback((file: File) => runAnalysis(file), [runAnalysis]);
@@ -193,7 +229,11 @@ export function AnalysisPage({
   const onTempoSelect = useCallback(
     (bpm: number) => {
       if (state.name !== "done") return;
-      runAnalysis(state.file, bpm);
+      // **비율로 넘긴다.** 격자 변환이 배수로만 정의되기 때문이고, 화면의
+      // 후보도 배수 가족이라 나눗셈이 늘 깔끔하게 떨어진다.
+      const ratio = bpm / state.report.tempo.bpm;
+      if (Math.abs(ratio - 1) < 0.02) return;
+      runAnalysis(state.file, ratio);
     },
     [runAnalysis, state],
   );
@@ -257,7 +297,7 @@ export function AnalysisPage({
       {report && state.name === "done" && (
         <>
           <p className="muted">
-            {state.file.name} · {seconds(report.durationSec)}
+            {state.file.name} · {clock(report.durationSec)}
           </p>
           <MetricGrid>
             <Metric
@@ -284,10 +324,15 @@ export function AnalysisPage({
           </MetricGrid>
 
           {/*
-            **후보들이 얼마나 팽팽했는지를 보여준다.** 신뢰도 숫자 하나로는
-            "무엇과 다퉜는가"를 알 수 없는데, 배수 오류(87 대 173)나 3/4 대 4/4는
-            바로 그 다툼에서 갈린다. 고른 답이 1등이 아닐 수도 있다 — 자기상관은
-            정수배를 못 가려서 악센트 구조로 뒤집기 때문이다(`resolveOctave`).
+            **두 막대가 서로 다른 것을 보인다**(2026-09-12부터).
+
+            템포 쪽은 **사람이 고칠 수 있는 배수들**이다(`metricalFamily`) —
+            모델이 답 하나를 주므로 후보 경쟁이 없고, 대신 "틀렸다면 거의 반드시
+            배수로 틀린다"를 그대로 낸다. 누르면 격자가 그 배수로 변환된다
+            (다시 분석하지 않는다 — `retimeBeats`).
+
+            박자 쪽은 **관측된 마디 길이의 분포**다 — 가설의 점수가 아니라
+            다운비트 사이에 실제로 몇 박이 들었는지를 센 값이라 지어낸 숫자가 없다.
           */}
           <Fieldset title="후보">
             <div className="shares-pair">
@@ -331,10 +376,17 @@ export function AnalysisPage({
           />
 
           {/* 여기부터는 로컬 사이드카가 있을 때만 나온다. 없으면 안내 한 줄이다 */}
+          {/*
+            `sections`는 드럼 표의 1차 좌표(`Chorus 2 · 1마디`)가 되는 **파생값이지
+            새 상태가 아니다** — 위의 `structure` 하나가 이미 파일 이름으로 막혀
+            있고, 구간을 두 번 계산하면 드럼 표와 구조 표의 `Chorus 2`가 갈린다.
+          */}
           <TranscriptionPanel
             report={report}
             file={state.file}
+            audio={audio}
             onStructure={onStructure}
+            sections={sections}
             {...transcription}
           />
 

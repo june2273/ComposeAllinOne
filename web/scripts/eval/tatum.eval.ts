@@ -36,7 +36,7 @@ import { test } from "vitest";
 
 import { analyzeAudio } from "../../src/core/analysis";
 import { ANALYSIS_RATE, extractFeatures, normalizeOnset } from "../../src/core/analysis/features";
-import { evalSongs, ratioName } from "./truth";
+import { evalSongs, ratioName, gridFor} from "./truth";
 import { loadMono } from "./wav";
 
 const OUT = process.env.EVAL_OUT ?? "/tmp/tatum";
@@ -93,7 +93,7 @@ test("tatum 비율과 밀도", { timeout: 60 * 60_000 }, () => {
     const samples = loadMono(song.audio);
     // **최종 BPM은 파이프라인 그대로 받는다** — resolveOctave·resolveDupleMeter가
     // 이미 손본 값이어야 "우리가 실제로 내는 답"과 대조가 된다
-    const report = analyzeAudio(samples, ANALYSIS_RATE);
+    const report = analyzeAudio(samples, gridFor(song.slot), ANALYSIS_RATE);
     const ourBpm = report.tempo.bpm;
 
     const features = extractFeatures(samples, ANALYSIS_RATE);

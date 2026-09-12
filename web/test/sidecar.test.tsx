@@ -18,6 +18,7 @@ import {
   detect,
   type SidecarResult,
 } from "../src/platform/sidecar";
+import { NullSynth } from "../src/core/audio";
 import { TranscriptionPanel } from "../src/ui/transcription";
 
 vi.mock("../src/core/score", () => ({
@@ -220,7 +221,7 @@ const REPORT: AnalysisReport = {
     confidence: 0.8,
     candidates: [],
     downbeats: [0, 2, 4, 6],
-  },
+      },
   key: {
     name: "C 장조",
     tonic: 0,
@@ -256,6 +257,7 @@ function panel(env: Partial<Parameters<typeof TranscriptionPanel>[0]>) {
     <TranscriptionPanel
       report={REPORT}
       file={new File([new Uint8Array([1])], "song.wav")}
+      audio={new NullSynth()}
       {...env}
     />,
   );
@@ -270,9 +272,31 @@ describe("3. 화면 — 있을 때와 없을 때", () => {
   afterEach(() => vi.restoreAllMocks());
 
   test("사이드카가 없으면 실행 방법을 보여준다 — 화면이 죽지 않는다", async () => {
-    panel({ probe: () => Promise.resolve(null) });
+    // 예산 0 = 기다리지 않는다. 빌드된 앱이 이 값이다(띄워 줄 개발 서버가 없다)
+    panel({ probe: () => Promise.resolve(null), startup: { budgetMs: 0 } });
     expect(await screen.findByText(/사이드카가 꺼져 있다/)).toBeTruthy();
     expect(screen.getByText(/uvicorn app.main:app/)).toBeTruthy();
+  });
+
+  test("기동 중이면 기다린다 — 켜는 중을 보이다가 저절로 준비된다", async () => {
+    // 개발 서버가 사이드카를 띄우는 동안 첫 두 번은 응답이 없다.
+    // **`probe`를 넣지 않는다** — 첫 물음과 그 뒤 되풀이가 같은 길로 가는지가
+    // 여기서 봐야 할 것이고, 둘 다 `env.fetch`를 탄다
+    let tries = 0;
+    const { fetch } = fakeFetch({
+      "/health": () => (++tries < 3 ? reply({}, false, 503) : reply(HEALTH)),
+    });
+    panel({
+      env: { baseUrl: BASE, fetch },
+      startup: { budgetMs: 3000, retryMs: 200 },
+    });
+
+    expect(await screen.findByText(/사이드카를 켜는 중/)).toBeTruthy();
+    // 기다리는 동안 명령어를 보여 주지 않는다 — 사용자가 할 일이 없다
+    expect(screen.queryByText(/uvicorn app.main:app/)).toBeNull();
+
+    expect(await screen.findByText(/스템 분리 · 멜로디 전사 시작/)).toBeTruthy();
+    expect(tries).toBe(3);
   });
 
   test("있으면 시작 버튼과 장치가 나온다", async () => {
@@ -360,6 +384,9 @@ describe("3. 화면 — 있을 때와 없을 때", () => {
     act(() => button.click());
     expect(await screen.findByText(/음표 3개/)).toBeTruthy();
     expect(screen.getByText("보컬")).toBeTruthy();
+    // **후처리 보컬은 줄로 나오지 않는다.** 파이프라인 내부 신호라 목록에서
+    // 뺐다 — 서버가 만드는 것도 온셋이 쓰는 것도 그대로다(아래 온셋 시험)
+    expect(screen.queryByText(/처리본/)).toBeNull();
     // 내려받기 주소는 이펙트에서 만들어진다(회수 시점을 알아야 해서다) —
     // 음표 수보다 한 렌더 늦게 나타나므로 여기서도 기다린다
     expect(await screen.findByText(/MusicXML \(악보\)/)).toBeTruthy();
@@ -382,7 +409,7 @@ describe("3. 화면 — 있을 때와 없을 때", () => {
         seen = signal;
         release = resolve;
       });
-    const props = { probe: () => Promise.resolve(HEALTH), run };
+    const props = { probe: () => Promise.resolve(HEALTH), run, audio: new NullSynth() };
     const { rerender } = render(
       <TranscriptionPanel
         report={REPORT}
