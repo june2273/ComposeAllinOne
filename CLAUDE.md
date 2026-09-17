@@ -180,6 +180,7 @@ cd server && .venv/bin/python -c "from rmvpe_onnx import ensure_model; ensure_mo
 | `server/app/` | **스템 분리·f0 추출·구조 인식.** 학습된 모델만. 음악적 판단 없음 | (파이썬) |
 | `server/app/structure.py` | **곡 구조(구간·라벨).** 학습된 모델만. 음악적 판단 없음 | (파이썬) |
 | `server/app/beats.py` | **비트·다운비트 — 템포·박자의 유일한 출처**(Beat This!). 작업 큐를 안 탄다 | (파이썬) |
+| `server/app/roformer.py` | **들어보기용 보컬 스템**(Mel-Band RoFormer). 전사 경로는 이걸 안 본다 | app/vendor (ZFTurbo MSST 반입, MIT) |
 | `server/app/cfp.py` | **옥타브 심판** — 스펙트럼 × 켑스트럼 살리언스. 순수 DSP, 모델 아님 | (numpy) |
 | `server/app/health.py` | 기동 자가진단 — 모델이 정말 도는가 | (파이썬) |
 | `server/scripts/extract_f0.py` | 평가용 — 서버 없이 f0만 뽑는다 | app/melody |
@@ -945,6 +946,12 @@ A4와 0.01%만 어긋나도 종이보다 몇 백분의 1mm 넘쳐 **쪽마다 �
 
 `web/src/core/analysis/chords.ts`. 강의 07이 정리한 고전 파이프라인 그대로다.
 
+> **화면에서 닫아 두었다 (2026-09-17).** 인식기와 시험은 그대로 돌지만 코드 표와
+> 전사 악보의 코드 심볼은 안 나간다 — 정답 0곡이라 정확도를 말할 수 없는 값을
+> 사용자 앞에 내놓지 않기로 했다. 스위치는 `ui/chords.tsx`의 `CHORDS_VISIBLE`
+> 하나이고, 분석 콘솔(`ChordCard`)과 `transcription.tsx`(`<harmony>`)가 둘 다 그걸
+> 본다. **다시 열기 전에 코드 정답부터 찍을 것**(아래 "아직 못 하는 것").
+
 ```
 샘플 ─[extractChordChroma]─ 긴 창 크로마 + 베이스 크로마
                              ↓ (비트로 접는다 — meter.beatChroma)
@@ -1083,6 +1090,7 @@ import하지 않는다** — `ChordEvent`와 모양만 맞추고 잇는 것은 `
 | **후처리 보컬** | **유·무성 마스크**(`merge_voicing`) + **재발음 온셋**(ODF) |
 | **drums** | **타점·루프·필인** (2026-09-04부터. 그 전에는 아무것도 안 했다) |
 | bass · other | **아무것도.** 화면의 재생·내려받기 전용이다 |
+| **vocals_roformer** | **아무것도.** 들어보기용이다(아래 절) |
 
 - **BPM·박자·조성·코드는 드럼 스템이 아니라 원본 믹스에서 딴다.** 브라우저
   워커가 스템을 기다리지 않고 도는 것이 요점이고(사이드카가 꺼져 있어도 나온다),
@@ -1159,6 +1167,25 @@ basic-pitch → RMVPE로 갈아끼울 때 웹은 한 줄도 안 바뀌었다(화
   **단 길이를 확인하고 쓴다** — 파일이 있는지만 보면 분리 도중에 죽어 잘려 쓰인
   WAV를 물려받고, 그 곡은 **뒷부분이 통째로 없는 채로 오류 하나 없이** 전사된다.
   `sf.info`로 헤더만 읽으므로 값이 싸다.
+
+### RoFormer 보컬 — htdemucs 옆에 하나 더 (2026-09-17)
+
+`server/app/roformer.py`. Mel-Band RoFormer(Kimberley Jensen 판, 가중치 MIT)로
+`stems/vocals_roformer.wav`를 **추가로** 쓰고, 웹은 `stems/`를 그대로 목록에
+띄우므로 "보컬 (RoFormer)" 줄이 생긴다. **htdemucs는 그대로다** — 유·무성
+마스크·재발음 온셋은 여전히 htdemucs `vocals`에서 난다. 귀로 비교한 뒤 갈아탈지는
+평가 하니스로 재서 정할 것(분리 SDR과 전사 정확도는 같은 것이 아니다).
+
+- **모델 코드는 `app/vendor/`에 파일로 반입했다**(ZFTurbo MSST 커밋 고정). PyPI
+  `BS-RoFormer` 최신판은 구조가 바뀌어 이 체크포인트와 키가 안 맞을 수 있다.
+  새 pip 의존성은 0이다. **vendor 파일은 고치지 말고 출처를 다시 받아 덮을 것.**
+- **가중치 913MB는 첫 사용 때 받는다**(리비전·SHA-256 고정). 피클이라
+  `weights_only=True`로만 연다. 자가진단은 import까지만 본다.
+- **느리다** — 8초 조각당 3.6초(MPS), 4분 곡에 수 분. 조각마다 진행률을 보고하고
+  그 자리가 취소 지점이다(규칙 4). 한 곡에 한 번만 돈다 — 이미 있으면 캐시가
+  맞고, 이 파일만 없으면 htdemucs 스템과 f0를 재사용하고 이것만 뽑는다.
+- **끄는 스위치(`SIDECAR_ROFORMER=0`)가 진단보다 먼저다**(`main._roformer_on`).
+  시험은 모듈 전체에서 끄고 시작한다 — 켜 두면 파이프라인 시험마다 913MB를 싣는다.
 
 ### f0 → 음표: 벗어난 **양**이 아니라 **시간**으로 자른다
 
@@ -2321,6 +2348,8 @@ cd server && .venv/bin/python scripts/f0_truth.py --all --variant octave2
 **검토서도 여기 둔다** — 아직 안 만든 것이 무엇에 막혀 있는지:
 [docs/손드럼_연습_검토.md](docs/손드럼_연습_검토.md)(드럼 패드로 따라 치기.
 입력은 이미 되고 판정 시계가 없다).
+[docs/좌우_분리_전사_검토.md](docs/좌우_분리_전사_검토.md)(좌우로 갈린 두 멜로디.
+채널별 전사로 가려지고, 막힌 것은 자동 판정 문턱과 모노로 읽는 입력단이다).
 
 **단, 문서의 스택 부분은 과거형으로 읽을 것.** PySide6·mido·python-rtmidi·sounddevice·pyfluidsynth를 전제로 쓰였는데 지금은 전부 웹으로 대체됐다. 살아 있는 것은 **음악적 판정 규칙**(3~8절)이고, 그 부분이 이 문서의 값이다.
 
@@ -2344,7 +2373,7 @@ verovio만 그대로 살아남았다(브라우저가 원래 주 타깃이라 오
 분류는 대역 규칙이며 반복 압축은 사양서 §10이다. 기록한 것은 **GM 드럼맵 규격의
 출처**뿐이다(citation.md 3-1절의 드럼 절).
 
-현재 쓰는 것: React·Vite·TypeScript·Vitest·oxlint(MIT), **verovio(LGPLv3)**, 음원 Upright Piano KW(CC0), 빌드 타임 도구 **ffmpeg(GPL-3.0)**, 사이드카의 **beat-this(MIT — 가중치도 MIT)·demucs(MIT)·rmvpe-onnx(MIT)·allin1(MIT)·natten(MIT)·madmom·torch·FastAPI**(citation.md 2-2절), 평가 하니스의 **mido(MIT)**. 배포 시 검토가 필요한 것은 **verovio(LGPLv3)** 하나다 — PySide6와 libsndfile은 Python 앱과 함께 빠졌다. 여기에 더해 **verovio가 동봉한 SMuFL 악보 폰트 5종은 라이선스 미확인 상태**다 — 우리 SVG 출력에 글리프 외곽선이 그대로 박혀 나가므로 배포 전에 반드시 확인할 것(citation.md 2절). 사이드카 쪽에서는 **htdemucs·RMVPE 가중치의 라이선스가 미확인**이고(코드는 MIT지만 가중치는 별개다 — RMVPE는 라이선스 사슬이 3단이라 citation.md 2-2절을 볼 것), demucs가 끌고 오는 **lameenc가 LGPL-3.0**이다 — MP3 출력에만 쓰이므로 우리는 부르지 않지만 배포 시 뺄 수 있는지 볼 것. **madmom은 소스가 BSD-3이고 데이터·모델 파일이 CC BY-NC-SA(비상업)로 갈려 있다** — 우리 실행 경로는 소스만 타지만 패키지에는 그 파일들이 함께 들어 있다. 반대로 **All-In-One 체크포인트는 미확인이 아니다**(HuggingFace가 MIT를 명시 — API로 직접 확인). **Beat This!도 마찬가지다** — README가 코드와 가중치를 함께 MIT로 밝힌다(2026-09-11 원문 확인). 다만 그 README가 **학습 파일 일부는 저작권이 살아 있거나 제한적 CC라고 스스로 밝히므로** 배포 형태를 정할 때 볼 것.
+현재 쓰는 것: React·Vite·TypeScript·Vitest·oxlint(MIT), **verovio(LGPLv3)**, 음원 Upright Piano KW(CC0), 빌드 타임 도구 **ffmpeg(GPL-3.0)**, 사이드카의 **beat-this(MIT — 가중치도 MIT)·Mel-Band RoFormer(ZFTurbo MSST 코드 반입 MIT — 가중치도 MIT)·demucs(MIT)·rmvpe-onnx(MIT)·allin1(MIT)·natten(MIT)·madmom·torch·FastAPI**(citation.md 2-2절), 평가 하니스의 **mido(MIT)**. 배포 시 검토가 필요한 것은 **verovio(LGPLv3)** 하나다 — PySide6와 libsndfile은 Python 앱과 함께 빠졌다. 여기에 더해 **verovio가 동봉한 SMuFL 악보 폰트 5종은 라이선스 미확인 상태**다 — 우리 SVG 출력에 글리프 외곽선이 그대로 박혀 나가므로 배포 전에 반드시 확인할 것(citation.md 2절). 사이드카 쪽에서는 **htdemucs·RMVPE 가중치의 라이선스가 미확인**이고(코드는 MIT지만 가중치는 별개다 — RMVPE는 라이선스 사슬이 3단이라 citation.md 2-2절을 볼 것), demucs가 끌고 오는 **lameenc가 LGPL-3.0**이다 — MP3 출력에만 쓰이므로 우리는 부르지 않지만 배포 시 뺄 수 있는지 볼 것. **madmom은 소스가 BSD-3이고 데이터·모델 파일이 CC BY-NC-SA(비상업)로 갈려 있다** — 우리 실행 경로는 소스만 타지만 패키지에는 그 파일들이 함께 들어 있다. 반대로 **All-In-One 체크포인트는 미확인이 아니다**(HuggingFace가 MIT를 명시 — API로 직접 확인). **Beat This!도 마찬가지다** — README가 코드와 가중치를 함께 MIT로 밝힌다(2026-09-11 원문 확인). 다만 그 README가 **학습 파일 일부는 저작권이 살아 있거나 제한적 CC라고 스스로 밝히므로** 배포 형태를 정할 때 볼 것.
 
 ## 객체지향 설계 방침
 

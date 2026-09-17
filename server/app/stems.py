@@ -20,11 +20,16 @@ from pathlib import Path
 from typing import Callable
 
 import numpy as np
+import soundfile as sf
 
 from .audio import Audio, MODEL_RATE, write_audio
 
 #: htdemucs가 내보내는 스템 이름. 순서는 모델 출력 순서 그대로다.
 STEM_NAMES = ("drums", "bass", "other", "vocals")
+
+#: 오프보컬(인스트루멘털) — 보컬을 뺀 나머지 셋을 더한 파생 스템.
+#: `stems/` 안의 파일 이름이자 웹이 부르는 오디오 이름이다(`roformer.STEM`과 같은 자리).
+INST = "inst"
 
 Progress = Callable[[str, float], None]
 
@@ -118,3 +123,19 @@ def separate(
         if progress:
             progress("스템 저장", 0.85 + 0.15 * (i + 1) / len(names))
     return paths
+
+
+def instrumental(paths: dict[str, Path], out_path: Path) -> Path:
+    """드럼·베이스·그 외를 더해 보컬만 뺀 믹스(오프보컬)를 만든다.
+
+    **새 모델이 필요 없다.** htdemucs는 네 스템을 합치면 원본과 같아지도록
+    학습되어 있으므로, 보컬만 뺀 셋을 더하면 그대로 오프보컬(karaoke) 믹스가
+    된다 — `separate()`가 이미 만들어 둔 것을 재료로만 쓴다.
+    """
+    total: np.ndarray | None = None
+    rate = MODEL_RATE
+    for name in ("drums", "bass", "other"):
+        samples, rate = sf.read(str(paths[name]), dtype="float32")
+        total = samples if total is None else total + samples
+    write_audio(out_path, Audio(samples=total.astype(np.float32), rate=rate))
+    return out_path

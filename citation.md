@@ -245,6 +245,7 @@ verovio는 **웹 번들에 통째로 들어간다**(`dist/assets/verovio-module-
 | [demucs](https://github.com/adefossez/demucs) | 4.1.0 | **MIT** (`dist-info/licenses/LICENSE` 원문 확인) | 아래 참조 | `app/stems.py` — htdemucs 4스템 분리 |
 | [rmvpe-onnx](https://github.com/NewComer00/rmvpe-onnx) | 0.2.3 | **MIT** (`dist-info/licenses/LICENSE` 원문: "Copyright (c) 2026 NewComer00" + MIT 전문) | 아래 참조 (별도 다운로드) | `app/melody.py` — 보컬 f0 커브 |
 | [allin1](https://github.com/mir-aidj/all-in-one) | 1.1.0 | **MIT** (`dist-info/licenses/LICENSE` 원문: "Copyright (c) 2023 Taejun Kim" + MIT 전문) | 아래 참조 | `app/structure.py` — 구간(intro/verse/chorus…)·비트·다운비트 |
+| [Music-Source-Separation-Training](https://github.com/ZFTurbo/Music-Source-Separation-Training) (**코드 반입**) | 커밋 `050cae7` | **MIT** (저장소 `LICENSE` 원문: "Copyright (c) 2024 Roman Solovyev (ZFTurbo)" + MIT 전문, GitHub API `license.spdx_id`로도 확인) | 아래 참조 — **MIT** | `app/vendor/` → `app/roformer.py` — Mel-Band RoFormer 보컬(들어보기용 스템) |
 | [torch](https://pytorch.org/) | 2.13.0 | Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND MIT | — | demucs가 쓴다. Apple Silicon에서 MPS 가속 |
 | [onnxruntime](https://onnxruntime.ai/) | 1.28.0 | MIT | — | rmvpe-onnx의 추론 백엔드 |
 
@@ -282,6 +283,37 @@ impact their use case."* 학습은 18개 데이터셋 4,556곡이다. allin1의 
 > 뒤 이걸 정답 14곡에 재서 **14/14**(우리 11/14 · allin1 10/14)가 나왔고,
 > 전사도 여섯 곡 전부에서 좋아졌다(정확 841 → 1345음). 자세한 것은
 > `docs/템포_배수오류_미해결.md` §3-3.
+
+**Mel-Band RoFormer 보컬 — 2026-09-17에 들어왔고, 들어보기용 스템이다**
+
+Wang, Lu & Chen, "Mel-RoFormer for Vocal Separation and Vocal Melody
+Transcription", ISMIR 2024 ([arXiv 2409.04702](https://arxiv.org/abs/2409.04702))가
+구조의 출처다. 원 구현은 [lucidrains/BS-RoFormer](https://github.com/lucidrains/BS-RoFormer)
+(MIT, Phil Wang)이고, 우리가 가져온 것은 그것을 고쳐 쓴 ZFTurbo MSST의 두 파일이다.
+
+**코드를 패키지로 받지 않고 파일로 반입했다.** `models/bs_roformer/mel_band_roformer.py`와
+`attend.py`를 커밋 `050cae7345f4ac1e1e27e066c2c5cdc0a2cdb679`에서 받아
+`server/app/vendor/`에 두었다(2026-09-17). 파일 머리에 출처와 MIT 전문을 붙였고,
+바꾼 것은 import 경로와 `@beartype` 데코레이터 제거 둘뿐이다. PyPI의 `BS-RoFormer`
+1.2.4는 새 의존성이 넷(`hyper-connections`·`pope-pytorch`·`torch-einops-utils`·`einx`)
+늘고 구조가 바뀌어 이 체크포인트와 키가 맞는다는 보장이 없었다. **새 pip 의존성은
+0이다** — torch·einops·rotary-embedding-torch·librosa·packaging이 이미 있었다.
+
+**가중치도 MIT다.** HuggingFace [`KimberleyJSN/melbandroformer`](https://huggingface.co/KimberleyJSN/melbandroformer)의
+`cardData.license`와 태그가 둘 다 `mit`다(HF API로 직접 확인, 2026-09-17).
+**코드 저장소 [KimberleyJensen/Mel-Band-Roformer-Vocal-Model](https://github.com/KimberleyJensen/Mel-Band-Roformer-Vocal-Model)에는
+라이선스가 없다** — 그래서 그 저장소의 코드는 쓰지 않았다. 체크포인트를 이
+설정(`configs/KimberleyJensen/config_vocals_mel_band_roformer_kj.yaml`)과 짝지어
+올려 둔 것이 ZFTurbo 문서(`docs/pretrained_models.md`, 보컬 SDR 10.98)이고,
+설정값은 `app/roformer.py`의 `CONFIG`에 그대로 옮겼다.
+
+- 파일 `MelBandRoformer.ckpt` 913,106,900바이트, 리비전 `ac9b0614ab3cd7f77219e18ba494dfd93956c348`로
+  고정, SHA-256 `87201f4d31afb5bc79993230fc49446918425574db48c01c405e44f365c7559e`
+  (HF가 밝힌 값과 내려받은 파일을 직접 대조해 일치).
+- 첫 사용 때 `~/.cache/huggingface/hub/`로 받는다. **피클 파일이라
+  `torch.load(weights_only=True)`로만 연다.** `strict=True`로 키 684개가 전부 맞는다.
+- **학습 데이터의 출처는 밝혀져 있지 않다.** README가 데이터셋 기여자에게 감사할
+  뿐 목록·라이선스를 적지 않았다. Beat This!의 학습 파일 단서와 같은 부류로 둔다.
 
 **All-In-One (곡 구조) — 2026-08-12에 들어왔다**
 

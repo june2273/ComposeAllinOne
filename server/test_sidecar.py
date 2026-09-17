@@ -22,14 +22,23 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import soundfile as sf
 
 from app import beats as beats_mod
 from app import cfp, main, melody
 from app.health import Check
-from app.audio import Audio, gate, highpass, normalize, process_vocal, resample
+from app.audio import Audio, gate, highpass, normalize, process_vocal, resample, write_audio
 from app.jobs import Cancelled, JobStore, digest_of
 
 RATE = 44_100
+
+
+@pytest.fixture(autouse=True)
+def _no_roformer(monkeypatch):
+    """**RoFormer는 끄고 시작한다.** 켜 두면 파이프라인을 도는 시험마다 913MB
+    모델을 싣고, 가중치가 없는 환경에서는 시험이 그걸 내려받는다. 규약은 아래
+    전용 시험이 가짜 분리기로 본다(`fake_roformer`)."""
+    monkeypatch.setenv("SIDECAR_ROFORMER", "0")
 
 
 def sine(seconds: float, hz: float, amplitude: float = 0.5) -> np.ndarray:
@@ -557,7 +566,7 @@ def test_probe_reports_every_model_independently():
 
 def test_health_carries_checks(client):
     body = client.get("/health").json()
-    assert set(body["checks"]) == {"stems", "melody", "structure", "beats"}
+    assert set(body["checks"]) == {"stems", "melody", "structure", "beats", "roformer"}
     for check in body["checks"].values():
         assert check["status"] in {"checking", "ok", "unavailable", "broken"}
 
@@ -734,7 +743,7 @@ def client(tmp_path: Path, monkeypatch):
 def test_health_answers_without_loading_models(client):
     body = client.get("/health").json()
     assert body["ok"] is True
-    assert set(body["models"]) == {"stems", "melody", "structure", "beats"}
+    assert set(body["models"]) == {"stems", "melody", "structure", "beats", "roformer"}
 
 
 def test_empty_upload_is_rejected(client):
@@ -839,6 +848,32 @@ def test_existing_stems_are_reused(tmp_path: Path):
     # 하나만 없어도 재사용하지 않는다 — 반쯤 남은 디렉터리를 믿으면 안 된다
     (stem_dir / f"{main.stems.STEM_NAMES[0]}.wav").unlink()
     assert main._stem_paths(tmp_path / "슬롯") == {}
+
+
+def test_instrumental_sums_the_three_non_vocal_stems(tmp_path: Path):
+    """오프보컬은 새 모델 없이 드럼·베이스·그 외를 더한 것이다.
+
+    htdemucs 네 스템은 합치면 원본과 같아지도록 학습되어 있으므로, 보컬만 뺀
+    셋을 더하면 그대로 오프보컬(karaoke) 믹스여야 한다.
+    """
+    # 진폭을 낮게 잡는다 — 셋을 더한 합이 PCM16의 ±1.0을 넘으면 클리핑되어
+    # "더하기가 맞았는가"가 아니라 "클리핑됐는가"를 재게 된다.
+    paths = {}
+    for name, hz in (("drums", 100.0), ("bass", 200.0), ("other", 300.0)):
+        path = tmp_path / f"{name}.wav"
+        write_audio(path, Audio(samples=sine(0.1, hz, amplitude=0.2), rate=RATE))
+        paths[name] = path
+
+    out = main.stems.instrumental(paths, tmp_path / "inst.wav")
+    mixed, rate = sf.read(str(out), dtype="float32")
+    expected = (
+        sine(0.1, 100.0, amplitude=0.2)
+        + sine(0.1, 200.0, amplitude=0.2)
+        + sine(0.1, 300.0, amplitude=0.2)
+    )
+    assert rate == RATE
+    # PCM16으로 구웠으므로 양자화 오차만 허용한다
+    np.testing.assert_allclose(mixed, expected, atol=1e-3)
 
 
 def test_missing_structure_is_404_not_an_error(client):
@@ -1160,3 +1195,138 @@ def test_health_reports_the_beat_tracker(client):
     body = client.get("/health").json()
     assert "beats" in body["models"]
     assert "beats" in body["checks"]
+
+
+# --- RoFormer 보컬 (들어보기용 스템) ---------------------------------------------
+
+
+def test_overlap_add_returns_input_for_identity_model():
+    """창을 씌워 이어 붙여도 모델이 항등이면 입력이 그대로 나와야 한다.
+
+    양 끝 보폭에서 창의 합이 무너지는 것을 덧대기가 받는지 본다 — 안 받으면
+    곡의 처음과 끝이 작아지거나 0으로 나눠진다.
+    """
+    from app import roformer
+
+    samples = np.random.default_rng(0).standard_normal((2, 37)).astype(np.float32)
+    out = roformer.overlap_add(samples, lambda piece: piece, chunk=8, overlap=2)
+    assert out.shape == samples.shape
+    np.testing.assert_allclose(out, samples, atol=1e-5)
+
+
+def test_overlap_add_reports_progress_to_the_end():
+    from app import roformer
+
+    seen: list[float] = []
+    roformer.overlap_add(
+        np.zeros((2, 20), dtype=np.float32),
+        lambda piece: piece,
+        chunk=8,
+        overlap=2,
+        progress=lambda _stage, ratio: seen.append(ratio),
+    )
+    assert seen == sorted(seen) and seen[-1] == 1.0
+
+
+def test_roformer_is_off_by_env(monkeypatch):
+    from app import roformer
+
+    monkeypatch.setenv("SIDECAR_ROFORMER", "0")
+    assert roformer.available() is False
+
+
+@pytest.fixture
+def fake_roformer(client, monkeypatch):
+    """분리기를 가짜로 갈아끼운다. 몇 번 불렸는지 센다."""
+    from app import main, roformer
+
+    calls: list[Path] = []
+
+    def separate(audio, out_dir, progress=None):
+        calls.append(out_dir)
+        path = out_dir / f"{roformer.STEM}.wav"
+        write_audio(path, audio)
+        return path
+
+    monkeypatch.setenv("SIDECAR_ROFORMER", "1")
+    monkeypatch.setattr(main.roformer, "available", lambda: True)
+    monkeypatch.setattr(main.roformer, "separate_vocals", separate)
+    return calls
+
+
+def test_roformer_stem_is_listed_and_served(client, fake_roformer):
+    """htdemucs 스템 옆에 놓이고, 웹이 목록과 오디오 경로로 받을 수 있어야 한다."""
+    created = client.post("/jobs", files={"file": ("a.wav", wav_bytes(), "audio/wav")}).json()
+    status = poll(client, created["jobId"])
+    assert status["done"] and status["error"] is None
+    assert len(fake_roformer) == 1
+
+    meta = client.get(f"/jobs/{created['jobId']}/meta").json()
+    assert "vocals_roformer" in meta["stems"]
+    audio = client.get(f"/jobs/{created['jobId']}/audio/vocals_roformer")
+    assert audio.status_code == 200
+
+
+def test_roformer_runs_once_per_song(client, fake_roformer, tmp_path: Path):
+    """있으면 다시 뽑지 않고, 없어졌으면 그것만 다시 뽑는다."""
+    data = wav_bytes()
+    first = client.post("/jobs", files={"file": ("a.wav", data, "audio/wav")}).json()
+    poll(client, first["jobId"])
+    assert client.post("/jobs", files={"file": ("a.wav", data, "audio/wav")}).json()["cached"]
+    assert len(fake_roformer) == 1
+
+    slot = next(p for p in tmp_path.iterdir() if (p / "meta.json").exists())
+    (slot / "stems" / "vocals_roformer.wav").unlink()
+    again = client.post("/jobs", files={"file": ("a.wav", data, "audio/wav")}).json()
+    assert again["cached"] is False
+    poll(client, again["jobId"])
+    assert len(fake_roformer) == 2
+    assert (slot / "stems" / "vocals_roformer.wav").exists()
+
+
+@pytest.fixture
+def fake_stems(monkeypatch):
+    """htdemucs를 가짜로 갈아끼운다. 몇 번 불렸는지 센다."""
+    calls: list[Path] = []
+
+    def separate(audio, out_dir, progress=None):
+        calls.append(out_dir)
+        paths = {}
+        for name in main.stems.STEM_NAMES:
+            path = out_dir / f"{name}.wav"
+            write_audio(path, audio)
+            paths[name] = path
+        return paths
+
+    monkeypatch.setattr(main.stems, "available", lambda: True)
+    monkeypatch.setattr(main.stems, "separate", separate)
+    return calls
+
+
+def test_inst_stem_is_derived_and_served(client, fake_stems):
+    """드럼+베이스+그 외를 더한 오프보컬이 목록에 나오고 내려받을 수 있어야 한다."""
+    created = client.post("/jobs", files={"file": ("a.wav", wav_bytes(), "audio/wav")}).json()
+    status = poll(client, created["jobId"])
+    assert status["done"] and status["error"] is None
+
+    meta = client.get(f"/jobs/{created['jobId']}/meta").json()
+    assert "inst" in meta["stems"]
+    audio = client.get(f"/jobs/{created['jobId']}/audio/inst")
+    assert audio.status_code == 200
+
+
+def test_inst_is_rebuilt_without_rerunning_htdemucs(client, fake_stems, tmp_path: Path):
+    """오프보컬만 없어졌으면 htdemucs를 다시 돌리지 않고 그것만 다시 합친다."""
+    data = wav_bytes()
+    first = client.post("/jobs", files={"file": ("a.wav", data, "audio/wav")}).json()
+    poll(client, first["jobId"])
+    assert len(fake_stems) == 1
+
+    slot = next(p for p in tmp_path.iterdir() if (p / "meta.json").exists())
+    (slot / "stems" / "inst.wav").unlink()
+    again = client.post("/jobs", files={"file": ("a.wav", data, "audio/wav")}).json()
+    assert again["cached"] is False
+    poll(client, again["jobId"])
+    # 스템은 재사용했다 — htdemucs가 다시 돌지 않았다
+    assert len(fake_stems) == 1
+    assert (slot / "stems" / "inst.wav").exists()

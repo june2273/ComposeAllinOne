@@ -17,6 +17,14 @@ import { confidenceTier } from "../core/analysis";
 import { Fieldset, Matrix } from "../ds";
 import { clock } from "./format";
 
+/**
+ * **코드 인식을 화면에서 닫아 둔다**(2026-09-17). 인식기(`core/analysis/chords.ts`)는
+ * 그대로 돌고 시험도 그대로지만, 정답 0곡이라 정확도를 말할 수 없는 채로
+ * 코드 표와 악보의 코드 심볼을 내보내지 않는다. 다시 여는 것은 이 한 줄이다 —
+ * 분석 콘솔의 코드 표와 전사 악보의 `<harmony>`가 둘 다 이 값을 본다.
+ */
+export const CHORDS_VISIBLE = false;
+
 /** 코드가 안 바뀐 마디에 찍는 글자. 빈 칸이면 "못 잡았다"로 읽힌다 */
 const SUSTAIN = "·";
 

@@ -34,7 +34,7 @@ import {
 import { type AudioBackend, NullSynth } from "../core/audio";
 import { analyzeFile } from "../platform/analyze";
 import { fetchBeats, type SidecarStructure } from "../platform/sidecar";
-import { ChordCard } from "./chords";
+import { CHORDS_VISIBLE, ChordCard } from "./chords";
 import { clock } from "./format";
 import { StructureCard } from "./structure";
 import {
@@ -44,9 +44,7 @@ import {
 
 /** 지금 못 하는 것들. 카탈로그의 `requires`와 달리 **사용자가 읽을 문장**이다. */
 const NOT_YET = [
-  "코드의 dim · aug · sus — 증3화음과 감7화음은 음 집합만으로 근음이 정해지지 않는다(C aug ≡ E aug ≡ G♯ aug). 베이스 스템으로 근음을 강제해야 하는데 그러면 코드가 사이드카에 묶인다",
-  "코드의 전위(/E) · 텐션(9th) — 근음 검증과 같은 자리에서 막혀 있다",
-  "코드 정확도 — 정답을 찍어 둔 곡이 아직 없다. 임계값이 전부 근거 없는 값이다",
+  "코드 진행 — 인식기는 있지만 정답을 찍어 둔 곡이 없어 정확도를 모른다. 재기 전까지 화면에서 닫아 두었다",
   "변박 · 전조 · 변속 — 섹션 경계는 나왔다. 구간마다 다시 재는 것이 다음이다",
   "섹션 라벨의 정확도 — 정답을 찍어 둔 곡이 아직 없다. 특히 pre-chorus는 모델이 아니라 우리 규칙이 붙인 것이다",
   "간주 · 솔로의 확인 — 그 구간에 노래가 있는지는 사이드카의 f0를 봐야 안다",
@@ -367,13 +365,15 @@ export function AnalysisPage({
             끝나므로 서버가 꺼져 있어도 나온다 — 아래에 두면 "AI 분석이 있어야
             나오는 것"처럼 보인다.
           */}
-          <ChordCard
-            chords={report.chords}
-            beatsPerBar={report.meter.beatsPerBar}
-            phase={report.meter.phase}
-            beats={report.beats}
-            confidence={report.chordConfidence}
-          />
+          {CHORDS_VISIBLE && (
+            <ChordCard
+              chords={report.chords}
+              beatsPerBar={report.meter.beatsPerBar}
+              phase={report.meter.phase}
+              beats={report.beats}
+              confidence={report.chordConfidence}
+            />
+          )}
 
           {/* 여기부터는 로컬 사이드카가 있을 때만 나온다. 없으면 안내 한 줄이다 */}
           {/*

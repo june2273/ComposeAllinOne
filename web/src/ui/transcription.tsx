@@ -22,6 +22,7 @@ import {
   transcribe,
 } from "../core/transcribe";
 import { extractOnset } from "../platform/analyze";
+import { CHORDS_VISIBLE } from "./chords";
 import { DrumPanel, type DrumPanelProps } from "./drums";
 import { ScorePlayer } from "./scoreplayer";
 import { type DownloadSource, useDownloads } from "./useDownloads";
@@ -51,9 +52,13 @@ import {
 /** 스템 이름을 사람이 읽는 말로. 이 표가 도메인 지식의 전부다 */
 const STEM_LABELS: Record<string, string> = {
   vocals: "보컬",
+  // 들어보기용. 전사는 여전히 위 `vocals`(htdemucs)를 쓴다 — server/app/roformer.py
+  vocals_roformer: "보컬 (RoFormer)",
   drums: "드럼",
   bass: "베이스",
   other: "그 외",
+  // 드럼+베이스+그 외를 더한 것. 새 모델 없이 htdemucs 스템만으로 합친다 — server/app/stems.py
+  inst: "오프보컬 (인스트)",
 };
 
 type State =
@@ -242,12 +247,15 @@ export function TranscriptionPanel({
       // **두 층을 잇는 자리다.** `core/transcribe`는 `core/analysis`를 모르므로
       // (서로 import하지 않는다) `ChordEvent`를 저쪽이 아는 모양으로 옮기는
       // 것은 이 파일의 일이다 — 온셋 곡선을 넘길 때와 같다.
-      chords: report.chords.map((chord) => ({
-        atSec: chord.startSec,
-        root: chord.root,
-        kind: chord.kind,
-        text: chord.suffix,
-      })),
+      // 코드 인식을 닫아 둔 동안은 악보에도 심볼을 안 얹는다(`CHORDS_VISIBLE`)
+      chords: CHORDS_VISIBLE
+        ? report.chords.map((chord) => ({
+            atSec: chord.startSec,
+            root: chord.root,
+            kind: chord.kind,
+            text: chord.suffix,
+          }))
+        : [],
     }),
     [report, file],
   );
