@@ -5,14 +5,39 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import App from "../src/App";
 import { NullSynth } from "../src/core/audio";
 import {
+  CIRCLE_MIX,
+  CIRCLE_OF_FIFTHS,
+  CIRCLE_SPANS,
   DIATONIC_INTERVALS,
   INTERMEDIATE,
   INTERVAL_BUILD,
   INTERVAL_HALF_STEPS,
   INTERVAL_TABLE,
+  KEY_SIGNATURE,
   ROUND_STEPS,
+  SCALE,
   TIME_STEPS,
+  optionsOf,
+  withOptions,
 } from "../src/core/config";
+import {
+  CIRCLE,
+  KEY_KINDS,
+  KeyKind,
+  circleNames,
+  keyAt,
+  parseSignature,
+  tonicName,
+  type KeyMode,
+  wrapPosition,
+} from "../src/core/harmony/keys";
+import {
+  SCALE_KINDS,
+  scaleName,
+  scalePitches,
+  tonics,
+} from "../src/core/harmony/scales";
+import { DEFAULT_BASE, KEY_BINDINGS } from "../src/core/keyboard";
 import type { IntervalQuestion } from "../src/core/questions";
 import {
   LETTERS,
@@ -129,6 +154,30 @@ function pressPitch(midi: number) {
   if (!key) throw new Error(`가상 건반에 ${name}이 없다`);
   act(() => {
     fireEvent.pointerDown(key);
+  });
+}
+
+/** 자판 폴백이 이 음에 닿는 키. 없으면 null (A~K는 C4~C5뿐이다) */
+function codeForNote(midi: number): string | null {
+  return KEY_BINDINGS.find((b) => DEFAULT_BASE + b.offset === midi)?.code ?? null;
+}
+
+/**
+ * 이름 붙은 칸에 글자를 넣는다 — 조표·5도권은 **칸이 여럿**이라 "답"으로는
+ * 가려낼 수 없다(`TextField.label`이 그래서 생겼다).
+ */
+function fillField(label: string, text: string) {
+  const input = screen.getByLabelText(label) as HTMLInputElement;
+  act(() => {
+    fireEvent.change(input, { target: { value: text } });
+  });
+}
+
+/** 그 칸에서 Enter. **어느 칸에서 눌러도 제출이다** */
+function enterOn(label: string) {
+  const input = screen.getByLabelText(label) as HTMLInputElement;
+  act(() => {
+    fireEvent.keyDown(input, { key: "Enter", isComposing: false });
   });
 }
 
@@ -968,3 +1017,377 @@ describe("StaffFigure — 재생 커서", () => {
  * `tempoWarning`을 재던 것인데 축 B가 없어져 신고 자체가 안 나온다. 사람이
  * 배수를 고치는 길은 후보 막대로 그대로 남아 있다(위 "후보 몫 막대" 묶음).
  */
+
+/**
+ * 순차 입력 — **악보가 한 음씩 자란다.**
+ *
+ * verovio는 jsdom에서 안 뜨므로 `StaffFigure`가 음이름으로 떨어진다. 여기서
+ * 보는 것은 그 글자가 **받아들인 음만큼** 길어지는가다 — 틀린 음이 악보에 찍히면
+ * 이 연습의 목적(눈에 익히기)이 거짓이 된다.
+ */
+describe("음계 — 순서대로 쌓는다", () => {
+  const SCALE_3 = { ...SCALE, questionCount: 3 };
+
+  function startScale() {
+    const finished: Result[][] = [];
+    render(
+      <QuizPage config={SCALE_3} audio={audio} onFinished={(r) => finished.push(r)} />,
+    );
+    return finished;
+  }
+
+  /** 지금 문제의 음들 — 화면에 적힌 음계 이름에서 되살린다 */
+  function shownScale(): Pitch[] {
+    const title = document.querySelector(".given")?.textContent ?? "";
+    for (const kind of SCALE_KINDS) {
+      for (const tonic of tonics(kind)) {
+        if (scaleName(tonic, kind) === title) return scalePitches(tonic, kind);
+      }
+    }
+    throw new Error(`음계 이름을 못 읽었다: ${title}`);
+  }
+
+  const count = () => document.querySelector(".scale__count")?.textContent ?? "";
+  const staff = () => document.querySelector(".staff")?.textContent ?? "";
+
+  test("으뜸음만 들려주고 여덟 칸을 센다", async () => {
+    startScale();
+    await pastLockout();
+    expect(count()).toContain("0 / 8");
+    expect(screen.getByText(/으뜸음부터/u)).toBeTruthy();
+    // 답은 건반으로 낸다 — 글자 칸이 없어야 한다
+    expect(screen.queryByLabelText("답")).toBeNull();
+  });
+
+  test("마우스로 차례로 누르면 악보가 한 음씩 자란다", async () => {
+    startScale();
+    await pastLockout();
+    const pitches = shownScale();
+
+    pressPitch(pitches[0].midi);
+    expect(count()).toContain("1 / 8");
+    expect(staff()).toContain(pitches[0].name);
+    expect(staff()).not.toContain(pitches[1].name);
+
+    for (const p of pitches.slice(1)) pressPitch(p.midi);
+    expect(screen.getByText("정답")).toBeTruthy();
+    // **채점 뒤에도 남는다** — 완성된 음계를 피드백 동안 보는 것이 목적이다
+    expect(count()).toContain("8 / 8");
+    expect(staff()).toContain(pitches[7].name);
+  });
+
+  test("틀린 음은 악보에 안 찍히고 실수로만 센다", async () => {
+    startScale();
+    await pastLockout();
+    const pitches = shownScale();
+    const wrongNote = pitches[1].midi === 61 ? 62 : 61;
+
+    pressPitch(wrongNote);
+    expect(count()).toContain("0 / 8");
+    expect(count()).toContain("틀린 입력 1회");
+    expect(staff()).not.toContain(noteName(wrongNote));
+
+    for (const p of pitches) pressPitch(p.midi);
+    expect(screen.getByText("오답")).toBeTruthy();
+  });
+
+  /** 자판 폴백도 같은 게이트를 지난다 — 입력 경로는 셋, 게이트는 하나다 */
+  test("자판으로도 들어간다", async () => {
+    startScale();
+    await pastLockout();
+    const pitches = shownScale();
+    const code = codeForNote(pitches[0].midi);
+    if (code === null) return;           // 첫 음이 A~K 밖이면 건너뛴다
+    pressCode(code);
+    expect(count()).toContain("1 / 8");
+  });
+
+  test("락아웃 중에는 아무것도 안 받는다", () => {
+    startScale();
+    // 락아웃을 안 넘기고 바로 누른다
+    const pitches = shownScale();
+    pressPitch(pitches[0].midi);
+    expect(count()).toContain("0 / 8");
+    expect(count()).not.toContain("틀린 입력");
+  });
+
+  /** **ESC가 치트가 되면 안 된다** — 멈췄다 와도 실수와 진행이 남는다 */
+  test("일시정지가 진행·실수를 지우지 않는다", async () => {
+    startScale();
+    await pastLockout();
+    const pitches = shownScale();
+    pressPitch(pitches[1].midi === 61 ? 62 : 61);   // 틀린 음
+    pressPitch(pitches[0].midi);
+    press("Escape");
+    expect(screen.getByText(/계속|재개/u)).toBeTruthy();
+    press("Escape");
+    await pastLockout();
+    expect(count()).toContain("1 / 8");
+    expect(count()).toContain("틀린 입력 1회");
+  });
+});
+
+describe("조표 — 조 이름을 적는다", () => {
+  function startKeys(kind: KeyKind, rounds = 3) {
+    const config = {
+      ...withOptions(KEY_SIGNATURE, {
+        ...optionsOf(KEY_SIGNATURE),
+        keyKind: KEY_KINDS.indexOf(kind),
+      }),
+      questionCount: rounds,
+    };
+    const finished: Result[][] = [];
+    render(
+      <QuizPage config={config} audio={audio} onFinished={(r) => finished.push(r)} />,
+    );
+    return { config, finished };
+  }
+
+  /** 오선지 자리의 글자에서 조표를 되읽는다 — 화면이 말한 것만 쓴다 */
+  function shownFifths(): number {
+    const text = document.querySelector(".staff")?.textContent ?? "";
+    const got = parseSignature(text.trim());
+    if (got === null) throw new Error(`조표를 못 읽었다: ${text}`);
+    return got;
+  }
+
+  test("조표를 그리고 장조 칸 하나를 받는다", async () => {
+    startKeys(KeyKind.Major);
+    await pastLockout();
+    expect(screen.getByLabelText("장조")).toBeTruthy();
+    expect(screen.queryByLabelText("단조")).toBeNull();
+    // 들려줄 것이 없으므로 "다시 듣기"가 없어야 한다
+    expect(screen.queryByRole("button", { name: /다시 듣기/u })).toBeNull();
+  });
+
+  /** **칸마다 이름이 달라야 한다** — 전부 "답"이면 소리로 듣는 사람이 못 가린다 */
+  test("두 칸이 각자 이름을 갖는다", async () => {
+    startKeys(KeyKind.Both);
+    await pastLockout();
+    expect(screen.getByLabelText("장조")).toBeTruthy();
+    expect(screen.getByLabelText("단조")).toBeTruthy();
+  });
+
+  test("읽은 조표의 으뜸음을 적으면 정답이고 다음으로 간다", async () => {
+    const { config } = startKeys(KeyKind.Major);
+    for (let i = 0; i < 3; i += 1) {
+      await pastLockout();
+      fillField("장조", keyAt(shownFifths()).major);
+      enterOn("장조");
+      expect(screen.getByText("정답")).toBeTruthy();
+      await act(async () => {
+        vi.advanceTimersByTime(config.feedbackMs + 100);
+      });
+    }
+    expect(screen.getByText("점수 3")).toBeTruthy();
+  });
+
+  test("자판 글자로 적어도 통과한다", async () => {
+    startKeys(KeyKind.Major);
+    await pastLockout();
+    const name = keyAt(shownFifths()).major;
+    fillField("장조", name.replace("♯", "#").replace("♭", "b").toLowerCase());
+    enterOn("장조");
+    expect(screen.getByText("정답")).toBeTruthy();
+  });
+
+  /**
+   * **덜 채운 것과 틀린 것은 다르다.** 빈 칸이 남으면 제출하지 않고 그 자리에서
+   * 알려 준다 — 안 그러면 한 칸만 치고 Enter를 눌러 오답이 쌓인다.
+   */
+  test("빈 칸이 남으면 제출되지 않는다", async () => {
+    startKeys(KeyKind.Both);
+    await pastLockout();
+    fillField("장조", keyAt(shownFifths()).major);
+    enterOn("장조");
+    expect(screen.getByText(/빈 칸을 모두 채운/u)).toBeTruthy();
+    expect(screen.queryByText("정답")).toBeNull();
+    expect(screen.queryByText("오답")).toBeNull();
+  });
+
+  test("한 칸만 틀리면 그 칸을 짚는다", async () => {
+    startKeys(KeyKind.Both);
+    await pastLockout();
+    fillField("장조", keyAt(shownFifths()).major);
+    fillField("단조", "H");
+    enterOn("단조");
+    expect(screen.getByText("오답")).toBeTruthy();
+    expect(document.body.textContent).toContain("단조 칸이 틀렸습니다");
+  });
+
+  /** 조 이름을 주는 유형은 오선지가 없다 — 그릴 조표가 아직 답이기 때문이다 */
+  test("조→조표 유형은 악보 대신 조 이름을 준다", async () => {
+    startKeys(KeyKind.Signature);
+    await pastLockout();
+    expect(document.querySelector(".staff")).toBeNull();
+    expect(document.querySelector(".given")?.textContent).toMatch(/(Major|minor)$/u);
+    expect(screen.getByLabelText("조표(붙는 순서)")).toBeTruthy();
+  });
+
+  test("참고표는 옵션으로만 나온다", async () => {
+    startKeys(KeyKind.Enharmonic);
+    await pastLockout();
+    expect(document.body.textContent).not.toContain("♯ 개수 + ♭ 개수 = 12");
+  });
+});
+
+describe("5도권 — 원을 채운다", () => {
+  function startCircle(span = 4, rounds = 3, circleMode = 0) {
+    const config = {
+      ...withOptions(CIRCLE_OF_FIFTHS, {
+        ...optionsOf(CIRCLE_OF_FIFTHS),
+        circleSpan: CIRCLE_SPANS.indexOf(span),
+        circleMode,
+      }),
+      questionCount: rounds,
+    };
+    render(<QuizPage config={config} audio={audio} onFinished={() => {}} />);
+    return config;
+  }
+
+  /**
+   * 화면이 말한 조건에서 답을 되살린다.
+   *
+   * **조성도 화면에서 읽는다** — 자리가 장조·단조에서 같으므로 그림만 보고는
+   * 어느 이름을 쓸지 알 수 없고, 그래서 문제가 그것을 말해 주는지가 시험 대상이다.
+   */
+  function shownCircle() {
+    const hint = document.querySelector(".hint")?.textContent ?? "";
+    const parsed = /^(.+)에서 (시계방향|반시계방향)으로 (\d+)칸을 (장조|단조)/u.exec(hint);
+    if (!parsed) throw new Error(`조건을 못 읽었다: ${hint}`);
+    const [, start, way, span, label] = parsed;
+    const mode: KeyMode = label === "단조" ? "minor" : "major";
+    const from = CIRCLE.findIndex((list) =>
+      list.some((f) => tonicName(f, mode) === start),
+    );
+    if (from < 0) throw new Error(`시작 자리를 못 찾았다: ${start}`);
+    const step = way === "시계방향" ? 1 : -1;
+    const spots = Array.from({ length: Number(span) }, (_, i) =>
+      wrapPosition(from + step * (i + 1)),
+    );
+    return { spots, mode };
+  }
+
+  test("열두 자리를 전부 그리고 한 자리를 준다", async () => {
+    startCircle();
+    await pastLockout();
+    expect(document.querySelectorAll(".ring__slot")).toHaveLength(12);
+    expect(document.querySelectorAll(".ring__slot--given")).toHaveLength(1);
+    expect(document.querySelectorAll(".ring__slot--active")).toHaveLength(4);
+    // 방향을 화살표만으로 말하지 않는다
+    expect(document.querySelector(".ring__direction")?.textContent).toMatch(
+      /시계방향|반시계방향/u,
+    );
+  });
+
+  /** **입력 칸의 DOM 순서가 원의 순서다** — 그래서 Tab이 그대로 맞는다 */
+  test("칸이 원의 순서대로 놓인다", async () => {
+    startCircle();
+    await pastLockout();
+    const labels = [...document.querySelectorAll(".keysig__name")].map(
+      (n) => n.textContent,
+    );
+    expect(labels).toEqual(["1칸", "2칸", "3칸", "4칸"]);
+  });
+
+  test("순서대로 채우면 정답", async () => {
+    const config = startCircle();
+    for (let i = 0; i < 3; i += 1) {
+      await pastLockout();
+      const { spots, mode } = shownCircle();
+      spots.forEach((p, k) => fillField(`${k + 1}칸`, circleNames(p, mode)[0]));
+      enterOn("4칸");
+      expect(screen.getByText("정답")).toBeTruthy();
+      await act(async () => {
+        vi.advanceTimersByTime(config.feedbackMs + 100);
+      });
+    }
+    expect(screen.getByText("점수 3")).toBeTruthy();
+  });
+
+  /**
+   * **원이 닫히는 자리는 뭘 써도 정답이다** — 거기서 묻는 것은 조표가 아니라
+   * 원의 자리라서 ♯계 이름과 ♭계 이름이 같은 자리에 앉는다.
+   */
+  test("모호한 자리는 두 표기 다 받는다", async () => {
+    const config = startCircle(6);
+    for (let round = 0; round < 12; round += 1) {
+      await pastLockout();
+      const { spots, mode } = shownCircle();
+      const at = spots.findIndex((p) => circleNames(p, mode).length > 1);
+      if (at >= 0) {
+        // 그 칸만 ♭계 이름으로, 나머지는 첫 표기로 적는다
+        spots.forEach((p, k) =>
+          fillField(`${k + 1}칸`, circleNames(p, mode)[k === at ? 1 : 0]),
+        );
+        enterOn("6칸");
+        expect(screen.getByText("정답")).toBeTruthy();
+        return;
+      }
+      enterOn("1칸");
+      await act(async () => {
+        vi.advanceTimersByTime(
+          config.difficulty.timeLimitSec! * 1000 + config.feedbackMs + 200,
+        );
+      });
+    }
+    throw new Error("모호한 자리를 지나는 문제가 안 나왔다");
+  });
+
+  test("한 칸을 밀어 적으면 오답", async () => {
+    startCircle();
+    await pastLockout();
+    const { spots, mode } = shownCircle();
+    spots.forEach((_, k) =>
+      fillField(`${k + 1}칸`, circleNames(spots[(k + 1) % spots.length], mode)[0]),
+    );
+    enterOn("4칸");
+    expect(screen.getByText("오답")).toBeTruthy();
+  });
+
+  /**
+   * **단조도 같은 원이다.** 자리가 하나도 안 움직이고 이름만 갈린다 — 그래서
+   * 화면이 조성을 말해 주지 않으면 풀 수가 없다.
+   */
+  test("단조를 고르면 단조 이름으로 채운다", async () => {
+    startCircle(4, 3, 1);
+    await pastLockout();
+
+    expect(document.body.textContent).toContain("단조 이름으로 채웁니다");
+    const { spots, mode } = shownCircle();
+    expect(mode).toBe("minor");
+    // 주어진 자리에 단조 이름이 적혀 있다
+    const given = document.querySelector(".ring__slot--given")?.textContent ?? "";
+    expect(given).toMatch(/^[a-g]/u);
+
+    spots.forEach((p, k) => fillField(`${k + 1}칸`, circleNames(p, mode)[0]));
+    enterOn("4칸");
+    expect(screen.getByText("정답")).toBeTruthy();
+  });
+
+  /** 자리가 같으니 **조성이 유일한 구분점이다** */
+  test("단조 문제에 장조 이름을 적으면 오답", async () => {
+    startCircle(4, 3, 1);
+    await pastLockout();
+    const { spots } = shownCircle();
+    spots.forEach((p, k) => fillField(`${k + 1}칸`, circleNames(p, "major")[0]));
+    enterOn("4칸");
+    expect(screen.getByText("오답")).toBeTruthy();
+  });
+
+  test("섞기 눈금은 두 조성을 다 낸다", async () => {
+    const config = startCircle(4, 12, CIRCLE_MIX);
+    const modes = new Set<string>();
+    for (let i = 0; i < 12 && modes.size < 2; i += 1) {
+      await pastLockout();
+      const { spots, mode } = shownCircle();
+      modes.add(mode);
+      spots.forEach((p, k) => fillField(`${k + 1}칸`, circleNames(p, mode)[0]));
+      enterOn("4칸");
+      await act(async () => {
+        vi.advanceTimersByTime(config.feedbackMs + 100);
+      });
+    }
+    expect([...modes].sort()).toEqual(["major", "minor"]);
+  });
+});

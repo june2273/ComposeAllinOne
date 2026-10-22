@@ -41,11 +41,22 @@ import {
   ROUND_STEPS,
   type SessionConfig,
   TIME_STEPS,
+  CIRCLE_SPANS,
+  isCircleStage,
   isIntervalStage,
+  isKeySignatureStage,
+  isScaleStage,
   optionsOf,
   stepIndex,
   withOptions,
 } from "../core/config";
+import {
+  CIRCLE_MODES,
+  CIRCLE_MODE_LABEL,
+  KEY_KINDS,
+  KEY_KIND_LABEL,
+} from "../core/harmony/keys";
+import { KIND_STEP, SCALE_KINDS } from "../core/harmony/scales";
 import { NO_SHIFT, noteFor, rangeKeys } from "../core/keyboard";
 import { isStageResponse, responseText } from "../core/questions";
 import { type Result, timedOut } from "../core/session";
@@ -145,6 +156,22 @@ const LEVEL_LABELS = ["연습 1 — 도수·반음", "연습 2 — 성질", "음
 const ALTER_LABELS = ["온음계", "반음계 ♯♭", "겹임시표 ♯♯♭♭"];
 
 /**
+ * 음계 종류 눈금. **마지막 칸이 "전부 섞어서"**이고, 이름은 `scales.ts`가 갖는다 —
+ * 여기서 손으로 적으면 문제 화면에 나오는 이름과 갈린다.
+ */
+const SCALE_LABELS = [...SCALE_KINDS.map((k) => KIND_STEP[k]), "전부 섞어서"];
+
+/** 조표 유형. 이름은 `harmony/keys.ts`가 갖는다 — 여기서 또 적지 않는다 */
+const KEY_LABELS = KEY_KINDS.map((k) => KEY_KIND_LABEL[k]);
+const CIRCLE_LABELS = CIRCLE_SPANS.map((n) => `${n}칸`);
+
+/** 5도권 조성 눈금. **마지막 칸이 "섞어서"**로 음계 종류와 같은 모양이다 */
+const CIRCLE_MODE_LABELS = [
+  ...CIRCLE_MODES.map((m) => CIRCLE_MODE_LABEL[m]),
+  "섞어서",
+];
+
+/**
  * 2분할의 오른쪽 — 고른 활동이 무엇이고 어떤 설정으로 시작할지.
  *
  * 옵션은 이 컴포넌트가 든다. 활동이 바뀌면 `key`로 통째로 다시 만들어져
@@ -172,6 +199,9 @@ function ActivityDetail({
   // 음정 활동만 단계·음 범위·겹음정을 갖는다. **지금 고른 단계의 스테이지**를
   // 봐야 한다 — 활동의 기본 스테이지를 보면 단계를 옮겨도 표 보기가 안 따라온다.
   const interval = activity.config !== undefined && isIntervalStage(activity.config.stage);
+  const scale = activity.config !== undefined && isScaleStage(activity.config.stage);
+  const keySig = activity.config !== undefined && isKeySignatureStage(activity.config.stage);
+  const circle = activity.config !== undefined && isCircleStage(activity.config.stage);
   // **지금 옵션이 만들어 낼 스테이지**를 그대로 묻는다. 단계·음정 해석이
   // 어느 프리셋을 고르는지는 `withOptions` 한 곳만 알면 된다 — 여기서 다시
   // 계산하면 옵션이 늘 때마다 두 곳이 갈린다.
@@ -250,12 +280,52 @@ function ActivityDetail({
               />
             </>
           )}
+          {scale && (
+            <StepSlider
+              label="음계 종류"
+              steps={SCALE_LABELS}
+              index={options.scaleKind}
+              hint="Harmonic은 7음을, Melodic은 6·7음을 반음 올린 것이다. 마지막 칸은 넷이 섞여 나온다"
+              onChange={(scaleKind) => setOptions((o) => ({ ...o, scaleKind }))}
+            />
+          )}
+          {keySig && (
+            <StepSlider
+              label="유형"
+              steps={KEY_LABELS}
+              index={options.keyKind}
+              hint="앞의 셋은 조표를 보고 으뜸음을, 넷째는 거꾸로 조표를 쓴다. 이명동음조는 ♯과 ♭ 개수의 합이 12인 셋이다"
+              onChange={(keyKind) => setOptions((o) => ({ ...o, keyKind }))}
+            />
+          )}
+          {circle && (
+            <>
+              <StepSlider
+                label="빈칸 수"
+                steps={CIRCLE_LABELS}
+                index={options.circleSpan}
+                hint="한 자리를 주면 그만큼 이어서 채운다. 방향은 문제마다 섞인다"
+                onChange={(circleSpan) => setOptions((o) => ({ ...o, circleSpan }))}
+              />
+              <StepSlider
+                label="조성"
+                steps={CIRCLE_MODE_LABELS}
+                index={options.circleMode}
+                hint="자리는 장조와 단조가 같다 — 나란한조가 한 칸에 앉는다. 마지막 칸은 문제마다 섞인다"
+                onChange={(circleMode) => setOptions((o) => ({ ...o, circleMode }))}
+              />
+            </>
+          )}
           {/* 참고표가 있는 스테이지에서만 나온다 — 없는 화면에 켜 두면
               아무 일도 일어나지 않아 옵션이 고장 난 것처럼 보인다 */}
           {stage !== undefined && usesTable(stage) && (
             <Toggle
               label="표 보기"
-              hint="음정표를 문제 화면에 함께 띄운다. 익으면 끄고 풀 것"
+              hint={
+                keySig
+                  ? "이명동음조 표(♯+♭=12)를 문제 화면에 함께 띄운다. 익으면 끄고 풀 것"
+                  : "음정표를 문제 화면에 함께 띄운다. 익으면 끄고 풀 것"
+              }
               checked={options.showTable}
               onChange={(showTable) => setOptions((o) => ({ ...o, showTable }))}
             />
@@ -438,6 +508,7 @@ export function QuizPage({
   }, [config.stage, high, low, noteOn, pause, replay, resume, view.paused]);
 
   const { question, result, remaining, ratio } = view;
+  const audible = ((question?.cueNotes ?? question?.answerNotes)?.length ?? 0) > 0;
   // **연결돼 있지 않으면 편다.** 상태가 아직 "requesting"인 동안에도 펴 두는
   // 편이 낫다 — 권한 확인이 끝날 때까지 화면이 비어 있는 것보다는 낫고,
   // 실제로 연결되면 접힌다.
@@ -449,7 +520,8 @@ export function QuizPage({
       : timedOut(result)
         ? { text: "시간 초과", tone: "timeout" }
         : { text: "오답", tone: "wrong" }
-    : { text: view.accepting ? "들어보세요" : "···", tone: "neutral" };
+    // 소리가 없는 활동(조표·5도권)에서 "들어보세요"는 거짓말이다
+    : { text: view.accepting ? (audible ? "들어보세요" : "읽어보세요") : "···", tone: "neutral" };
 
   return (
     <Stack>
@@ -475,6 +547,8 @@ export function QuizPage({
           showTable={config.showTable}
           maxNumber={config.difficulty.maxIntervalNumber}
           maxAlter={config.difficulty.maxAlter}
+          played={view.played}
+          mistakes={view.mistakes}
           onAnswer={respond}
         />
       )}
@@ -517,7 +591,10 @@ export function QuizPage({
       />
       <div className="spacer" />
 
-      <Button onClick={replay}>다시 듣기 (Space)</Button>
+      {/* **들려줄 것이 없으면 단추를 감춘다.** 조표·5도권은 소리가 없는 활동이라
+          `playNotes([])`가 조용히 아무것도 안 하고, 그러면 눌러도 반응이 없는
+          단추가 남는다. 스테이지 목록을 또 손으로 들지 않고 문제에 물어본다 */}
+      {audible && <Button onClick={replay}>다시 듣기 (Space)</Button>}
       <p className="muted quiz__hint">ESC — 일시정지</p>
 
       {view.paused && (

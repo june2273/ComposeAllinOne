@@ -28,7 +28,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import beats, melody, roformer, stems, structure
+from . import beats, melody, stems, structure
 from .audio import process_vocal, read_audio, write_audio
 from .health import Probe
 from .jobs import Cancelled, Job, JobStore, digest_of
@@ -55,7 +55,6 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             "melody": (melody.available, melody.selftest),
             "structure": (structure.available, structure.selftest),
             "beats": (beats.available, beats.selftest),
-            "roformer": (roformer.available, roformer.selftest),
         }
     )
     yield
@@ -94,14 +93,12 @@ def health() -> dict:
         "melody": probe.get("melody"),
         "structure": probe.get("structure"),
         "beats": probe.get("beats"),
-        "roformer": probe.get("roformer"),
     }
     installed = {
         "stems": stems.available,
         "melody": melody.available,
         "structure": structure.available,
         "beats": beats.available,
-        "roformer": roformer.available,
     }
     return {
         "ok": True,
@@ -157,26 +154,8 @@ def _stem_paths(out_dir: Path, duration: float | None = None) -> dict[str, Path]
     return paths
 
 
-def _roformer_on() -> bool:
-    """**끄는 스위치가 진단보다 먼저다.** 진단은 기동 때 한 번 돌아서, 그 뒤에
-    `SIDECAR_ROFORMER=0`을 줘도 `ok`가 남아 있을 수 있다."""
-    return roformer.enabled() and _usable("roformer", roformer.available)
-
-
-def _roformer_path(out_dir: Path, duration: float | None = None) -> Path | None:
-    """이미 뽑아 둔 RoFormer 보컬. `_stem_paths`와 같은 이유로 길이를 확인한다."""
-    import soundfile as sf
-
-    path = out_dir / "stems" / f"{roformer.STEM}.wav"
-    if not path.exists():
-        return None
-    if duration is not None and duration - sf.info(str(path)).duration > _STEM_TOLERANCE_SEC:
-        return None
-    return path
-
-
 def _inst_path(out_dir: Path, duration: float | None = None) -> Path | None:
-    """이미 합쳐 둔 오프보컬. `_roformer_path`와 같은 이유로 길이를 확인한다."""
+    """이미 합쳐 둔 오프보컬. `_stem_paths`와 같은 이유로 길이를 확인한다."""
     import soundfile as sf
 
     path = out_dir / "stems" / f"{stems.INST}.wav"
@@ -240,8 +219,8 @@ def _pipeline(job: Job, source: Path, out_dir: Path) -> Path:
             paths = stems.separate(
                 audio,
                 stem_dir,
-                # htdemucs가 앞 35%, RoFormer가 그다음 18%를 차지한다고 본다
-                progress=lambda stage, ratio: report(stage, 0.05 + ratio * 0.35),
+                # 분리가 전체의 앞 55%를 차지한다고 본다
+                progress=lambda stage, ratio: report(stage, 0.05 + ratio * 0.53),
             )
         vocal_path = paths.get("vocals")
         # **오프보컬도 htdemucs 스템에만 달려 있다.** 새 모델 없이 드럼·베이스·
@@ -253,16 +232,6 @@ def _pipeline(job: Job, source: Path, out_dir: Path) -> Path:
         # 모델이 없으면 원본을 보컬로 취급한다. 반주가 섞여 f0가 나빠지지만
         # **파이프라인이 끝까지 도는 것**이 진단에 훨씬 쓸모 있다.
         vocal_path = None
-
-    # **들어보기용 보컬을 하나 더 뽑는다**(`roformer.py` 첫 주석). 아래 멜로디
-    # 경로는 이걸 보지 않는다 — `vocal_path`는 여전히 htdemucs다.
-    if _roformer_on() and _roformer_path(out_dir, audio.duration) is None:
-        (out_dir / "stems").mkdir(parents=True, exist_ok=True)
-        roformer.separate_vocals(
-            audio,
-            out_dir / "stems",
-            progress=lambda stage, ratio: report(stage, 0.40 + ratio * 0.18),
-        )
 
     melody_engine: str | None = melody.ENGINE if has_melody else None
     # 옥타브 2패스가 되올린 프레임 수. 커브를 새로 뽑을 때만 값이 선다 —
@@ -389,10 +358,6 @@ def _cache_hit(out_dir: Path) -> bool:
     if _usable("stems", stems.available) and _inst_path(out_dir) is None:
         return False
     if _usable("melody", melody.available) and not meta.get("hasMelody"):
-        return False
-    # 스템이 곡에만 달려 있으므로 **이것만 없으면 이것만 뽑는다** — `_pipeline`이
-    # htdemucs 스템과 f0를 재사용한다.
-    if _roformer_on() and _roformer_path(out_dir) is None:
         return False
     if meta.get("hasMelody") and meta.get("melodyEngine") != melody.ENGINE:
         return False
@@ -529,7 +494,6 @@ def job_audio(job_id: str, name: str) -> FileResponse:
         "vocal_processed": out_dir / "vocal_processed.wav",
         **{stem: out_dir / "stems" / f"{stem}.wav" for stem in stems.STEM_NAMES},
         stems.INST: out_dir / "stems" / f"{stems.INST}.wav",
-        roformer.STEM: out_dir / "stems" / f"{roformer.STEM}.wav",
     }
     path = allowed.get(name)
     if path is None or not path.exists():

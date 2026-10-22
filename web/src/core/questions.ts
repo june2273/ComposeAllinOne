@@ -17,6 +17,7 @@ import {
   axesAllow,
 } from "./config";
 import {
+  ACCIDENTAL_TEXT,
   type Interval,
   LETTERS,
   LETTER_PC,
@@ -31,6 +32,31 @@ import {
   pitchClasses,
   withoutAlter,
 } from "./theory";
+import {
+  CIRCLE_MODES,
+  CIRCLE_MODE_LABEL,
+  CIRCLE_SIZE,
+  ENHARMONIC,
+  KEYS,
+  KEY_KIND_LABEL,
+  KeyKind,
+  type KeyMode,
+  accidentalLetters,
+  circleNames,
+  keyAt,
+  keyLabel,
+  signatureLabel,
+  tonicName,
+  wrapPosition,
+} from "./harmony/keys";
+import {
+  KIND_LABEL,
+  SCALE_KINDS,
+  type ScaleKind,
+  scaleName,
+  scalePitches,
+  tonics,
+} from "./harmony/scales";
 
 /** 재현 가능한 난수 (mulberry32). 테스트가 시드를 고정할 수 있어야 한다. */
 export class Rng {
@@ -194,12 +220,48 @@ export interface IntervalResponse {
   readonly quality: string | null;
 }
 
-export type StageResponse = CountResponse | QualityResponse | IntervalResponse;
+/**
+ * 순차 입력 — 건반으로 순서대로 친 결과. 음계가 쓴다.
+ *
+ * 화면에서 만든 답이 아니라 **`Session.submit`이 수집기에서 싸서 보낸 것**이다.
+ * `notes`에는 받아들인 음만 들어 있으므로(틀린 음은 거부됐다) **실수 횟수를
+ * 따로 실어야** 채점기가 "틀리지 않고 쳤는가"를 알 수 있다.
+ */
+export interface SequenceResponse {
+  readonly form: "sequence";
+  readonly notes: readonly number[];
+  readonly mistakes: number;
+}
+
+/**
+ * 글자 칸 N개 — 조표와 5도권이 **함께** 쓴다.
+ *
+ * 둘 다 "순서가 있는 칸을 채우는 일"이라 폼도 채점기도 하나다. 칸마다의 정답과
+ * 비교 규칙은 응답이 아니라 **문제**(`KeyQuestion.fields`)가 들고 있다 — 응답은
+ * 사용자가 친 글자 그대로여야 오답 화면에 그대로 보여 줄 수 있다.
+ */
+export interface FieldsResponse {
+  readonly form: "fields";
+  readonly values: readonly string[];
+}
+
+export type StageResponse =
+  | CountResponse
+  | QualityResponse
+  | IntervalResponse
+  | SequenceResponse
+  | FieldsResponse;
 
 export function isStageResponse(v: unknown): v is StageResponse {
   if (typeof v !== "object" || v === null || !("form" in v)) return false;
   const form = (v as { form: unknown }).form;
-  return form === "count" || form === "quality" || form === "interval";
+  return (
+    form === "count" ||
+    form === "quality" ||
+    form === "interval" ||
+    form === "sequence" ||
+    form === "fields"
+  );
 }
 
 export function responseText(r: StageResponse): string {
@@ -210,6 +272,12 @@ export function responseText(r: StageResponse): string {
       return `${r.quality ?? "?"}음정`;
     case "interval":
       return `${r.quality ?? "?"}${r.number ?? "?"}도`;
+    case "sequence":
+      return r.mistakes > 0
+        ? `${r.notes.length}음 · 틀린 입력 ${r.mistakes}회`
+        : `${r.notes.length}음`;
+    case "fields":
+      return r.values.map((v) => (v.trim() === "" ? "—" : v)).join(" · ");
   }
 }
 
@@ -430,6 +498,364 @@ export class IntervalBuildGenerator implements QuestionGenerator {
   }
 }
 
+// --- 화성학: 음계 연주 -----------------------------------------------------------
+
+/**
+ * 음계 이름을 주고 **건반으로 상행 8음을 순서대로** 치게 하는 문제.
+ *
+ * `answerNotes`가 곧 쳐야 할 순서이고, `pitches`가 그 표기다. 화면은 받아들인
+ * 개수만큼 `pitches`를 잘라 악보에 그린다 — **틀린 음은 수집기가 거부하므로
+ * 받아들인 음은 정의상 기대한 음이고, 표기를 추측할 일이 없다.**
+ */
+export interface ScaleQuestion extends Question {
+  readonly tonic: Pitch;
+  readonly scaleKind: ScaleKind;
+  /** 상행 8음의 표기. `answerNotes`와 같은 순서다 */
+  readonly pitches: readonly Pitch[];
+}
+
+export function isScaleQuestion(q: Question): q is ScaleQuestion {
+  return "pitches" in q && "tonic" in q;
+}
+
+/**
+ * 음계 문제 생성기.
+ *
+ * 종류를 먼저 고르고(`scalePool`) 그 안에서 으뜸음을 고른다. **직전과 같은
+ * 음계는 내지 않는다** — `SingleNoteGenerator`가 같은 음을 피하는 것과 같다.
+ *
+ * 소리는 **으뜸음 하나만** 울린다(`cueNotes`). 음계를 통째로 들려주면 답을
+ * 알려주는 셈이고, 아무것도 안 울리면 "다시 듣기"가 거짓말이 된다.
+ */
+export class ScaleGenerator implements QuestionGenerator {
+  readonly kind = Stage.Scale;
+  private readonly pool: readonly ScaleKind[];
+  private readonly rng: Rng;
+  private last = "";
+
+  constructor(axes: DifficultyAxes, rng: Rng = new Rng()) {
+    this.rng = rng;
+    this.pool = axes.scalePool.length ? axes.scalePool : SCALE_KINDS;
+  }
+
+  generate(): ScaleQuestion {
+    const kind = this.rng.choice(this.pool);
+    const choices = tonics(kind);
+    const picked = choices.filter((t) => `${kind}:${t.name}` !== this.last);
+    const tonic = this.rng.choice(picked.length ? picked : choices);
+    this.last = `${kind}:${tonic.name}`;
+
+    const pitches = scalePitches(tonic, kind);
+    const notes = pitches.map((p) => p.midi);
+    const name = scaleName(tonic, kind);
+    const altered = pitches.filter((p) => p.alter !== 0).length;
+
+    return {
+      kind: this.kind,
+      answerNotes: notes,
+      // **답을 울리지 않는다.** 들려주는 것은 출발점인 으뜸음뿐이다
+      cueNotes: [tonic.midi],
+      requiredPcs: pitchClasses(notes),
+      optionalPcs: new Set(),
+      prompt: `${name}을 낮은 음부터 차례로 연주하세요`,
+      answerText: `${name} — ${pitches.map((p) => p.name).join(" ")}`,
+      tags: [
+        "화성학",
+        "음계",
+        KIND_LABEL[kind],
+        `으뜸음:${tonic.letter}${ACCIDENTAL_TEXT[tonic.alter]}`,
+        "상행",
+        altered === 0 ? "임시표없음" : `임시표${altered}개`,
+      ],
+      tonic,
+      scaleKind: kind,
+      pitches,
+    };
+  }
+}
+
+// --- 화성학: 조표 · 5도권 -------------------------------------------------------
+
+/**
+ * 채워야 할 칸 하나.
+ *
+ * **정답을 문제가 들고 있고 비교 규칙까지 들고 있다** — 채점기가 조표를 다시
+ * 계산하지 않게 하려는 것이다(계산이 두 곳에 있으면 갈린다).
+ */
+export interface KeyField {
+  /** 칸 이름. `"장조"` · `"단조"` · `"조표"` */
+  readonly label: string;
+  /** 비교 규칙 — 조 이름인가, 붙는 음이름인가, 조표 개수인가 */
+  readonly kind: "key" | "letters" | "signature";
+  /** 화면에 보여줄 정답 */
+  readonly answer: string;
+  /** 정답으로 칠 표기 전부. 이명동음 자리는 둘이다 */
+  readonly accept: readonly string[];
+  /** 입력 칸의 자리표시 */
+  readonly placeholder: string;
+}
+
+/**
+ * 조표 문제와 5도권 문제가 **같은 모양**이다 — 주어진 것 하나와 채울 칸 N개.
+ *
+ * 다른 것은 화면뿐이라(오선지냐 원이냐) 스테이지만 둘이고 채점기는 하나다.
+ */
+export interface KeyQuestion extends Question {
+  /** 오선지에 그릴 조표. null이면 악보를 안 그린다(조→조표 유형) */
+  readonly fifths: number | null;
+  /** 글자로 주는 조건. `"D Major"` · `"G에서 시계방향"` */
+  readonly given: string;
+  readonly fields: readonly KeyField[];
+  /** 5도권 문제일 때 원을 그릴 자료 */
+  readonly circle?: CircleShape;
+}
+
+/** 5도권 화면이 그릴 것 — 자리마다 무엇이 적혀 있는가 */
+export interface CircleShape {
+  /** 주어진 자리 */
+  readonly from: number;
+  /** 시계방향인가 */
+  readonly clockwise: boolean;
+  /** 채워야 할 자리들, 순서대로 */
+  readonly blanks: readonly number[];
+  /**
+   * 어느 이름으로 채우는가. **자리는 이것과 무관하다** — 나란한조가 같은 칸에
+   * 앉으므로 바뀌는 것은 적히는 글자뿐이다.
+   */
+  readonly mode: KeyMode;
+}
+
+export function isKeyQuestion(q: Question): q is KeyQuestion {
+  return "fields" in q && "given" in q;
+}
+
+/**
+ * 조 이름 칸 하나. **정답은 딱 하나다.**
+ *
+ * 이명동음조를 여기서 함께 받아 주면 안 된다 — 그림에 ♯이 다섯이면 그 조표는
+ * **B장조뿐**이고, C♭장조는 ♭이 일곱인 **다른 그림**이다. 둘 다 받으면
+ * "조표를 읽었다"가 아니라 "음고류를 맞혔다"가 되어 이 활동이 가르치려는 것이
+ * 사라진다.
+ *
+ * 두 이름이 다 맞는 자리는 5도권뿐이다 — 거기서 묻는 것은 조표가 아니라
+ * **원의 자리**라서, 그 자리에 ♯계 이름과 ♭계 이름이 함께 앉는다.
+ */
+function keyFieldOf(label: string, fifths: number, mode: KeyMode): KeyField {
+  const name = tonicName(fifths, mode);
+  return {
+    label,
+    kind: "key",
+    answer: name,
+    accept: [name],
+    placeholder: mode === "major" ? "D" : "b",
+  };
+}
+
+/**
+ * 조표 문제 생성기 — 유형 하나를 받아 칸을 짠다.
+ *
+ * 다섯 유형이 **전부 같은 자료(조표 하나)에서 나온다.** 주는 칸과 묻는 칸만
+ * 다르다 — 그래서 유형이 늘어도 화면도 채점기도 안 바뀐다.
+ */
+export class KeySignatureGenerator implements QuestionGenerator {
+  readonly kind = Stage.KeySignature;
+  private readonly keyKind: KeyKind;
+  private readonly rng: Rng;
+  private last = -99;
+
+  constructor(axes: DifficultyAxes, rng: Rng = new Rng()) {
+    this.rng = rng;
+    this.keyKind = axes.keyKind;
+  }
+
+  /** 직전과 같은 조표는 안 낸다 */
+  private pick(pool: readonly number[]): number {
+    const choices = pool.filter((f) => f !== this.last);
+    const got = this.rng.choice(choices.length ? choices : pool);
+    this.last = got;
+    return got;
+  }
+
+  generate(): KeyQuestion {
+    return this.keyKind === KeyKind.Enharmonic ? this.enharmonic() : this.plain();
+  }
+
+  /** 이명동음조 — ♯쪽과 ♭쪽을 섞어 낸다 */
+  private enharmonic(): KeyQuestion {
+    const pairs = ENHARMONIC.flatMap(([sharp, flat]) => [
+      [sharp, flat],
+      [flat, sharp],
+    ]);
+    const [from, to] = this.rng.choice(pairs);
+    this.last = from;
+    const shown = keyLabel(from, "major");
+    const want = keyAt(to);
+    return {
+      kind: this.kind,
+      answerNotes: [],
+      cueNotes: [],
+      requiredPcs: new Set(),
+      optionalPcs: new Set(),
+      prompt: `${shown}와 같은 조표를 ${from > 0 ? "♭" : "♯"}으로 적으면?`,
+      answerText: `${shown} = ${keyLabel(to, "major")} (${signatureLabel(from)} = ${signatureLabel(to)})`,
+      tags: ["화성학", "조표", "이명동음조", signatureLabel(from)],
+      fifths: from,
+      given: `${shown} · ${signatureLabel(from)}`,
+      fields: [
+        {
+          label: "조표",
+          kind: "signature",
+          answer: signatureLabel(to),
+          accept: [signatureLabel(to)],
+          placeholder: to > 0 ? "♯5" : "♭5",
+        },
+        {
+          label: "장조",
+          kind: "key",
+          answer: want.major,
+          accept: [want.major],
+          placeholder: "C♭",
+        },
+      ],
+    };
+  }
+
+  /** 나머지 넷 — 조표 그림이나 조 이름을 주고 칸을 채운다 */
+  private plain(): KeyQuestion {
+    const all = KEYS.map((k) => k.fifths);
+    const fifths = this.pick(all);
+    const entry = keyAt(fifths);
+    const sig = signatureLabel(fifths);
+
+    if (this.keyKind === KeyKind.Signature) {
+      // 조 이름을 주고 조표와 나란한조를 묻는다. 장·단 어느 쪽을 줄지 섞는다
+      const givenMode: KeyMode = this.rng.next() < 0.5 ? "major" : "minor";
+      const otherMode: KeyMode = givenMode === "major" ? "minor" : "major";
+      const letters = accidentalLetters(fifths);
+      return {
+        kind: this.kind,
+        answerNotes: [],
+        cueNotes: [],
+        requiredPcs: new Set(),
+        optionalPcs: new Set(),
+        prompt: "조표에 붙는 음이름을 순서대로 적고, 나란한조를 쓰세요",
+        answerText:
+          `${keyLabel(fifths, givenMode)} — ${sig}` +
+          `${letters ? ` (${letters.split("").join(" ")})` : ""}` +
+          ` · 나란한조 ${keyLabel(fifths, otherMode)}`,
+        tags: ["화성학", "조표", "조→조표", sig],
+        fifths: null,
+        given: keyLabel(fifths, givenMode),
+        fields: [
+          {
+            label: "조표(붙는 순서)",
+            kind: "letters",
+            answer: letters === "" ? "없음" : letters.split("").join(" "),
+            accept: letters === "" ? ["없음", "0", "-"] : [letters],
+            placeholder: "F C",
+          },
+          keyFieldOf(
+            otherMode === "major" ? "나란한 장조" : "나란한 단조",
+            fifths,
+            otherMode,
+          ),
+        ],
+      };
+    }
+
+    // 조표 그림을 주고 으뜸음을 묻는다
+    const fields: KeyField[] =
+      this.keyKind === KeyKind.Both
+        ? [keyFieldOf("장조", fifths, "major"), keyFieldOf("단조", fifths, "minor")]
+        : this.keyKind === KeyKind.Minor
+          ? [keyFieldOf("단조", fifths, "minor")]
+          : [keyFieldOf("장조", fifths, "major")];
+    const asked =
+      this.keyKind === KeyKind.Both
+        ? "장조와 단조 으뜸음을"
+        : this.keyKind === KeyKind.Minor
+          ? "단조 으뜸음을"
+          : "장조 으뜸음을";
+
+    return {
+      kind: this.kind,
+      answerNotes: [],
+      cueNotes: [],
+      requiredPcs: new Set(),
+      optionalPcs: new Set(),
+      prompt: `이 조표의 ${asked} 쓰세요`,
+      answerText: `${sig} — ${keyLabel(fifths, "major")} · ${keyLabel(fifths, "minor")}`,
+      tags: ["화성학", "조표", KEY_KIND_LABEL[this.keyKind], sig, entry.major],
+      fifths,
+      given: "",
+      fields,
+    };
+  }
+}
+
+/**
+ * 5도권 생성기 — 한 자리를 주고 이어지는 자리를 묻는다.
+ *
+ * **모호한 세 자리(B/C♭ · F♯/G♭ · C♯/D♭)는 어느 이름으로 써도 정답이다** —
+ * 거기가 ♯계와 ♭계가 만나 원이 닫히는 곳이고, 이명동음조 유형이 묻는 것과
+ * 같은 사실이다.
+ */
+export class CircleGenerator implements QuestionGenerator {
+  readonly kind = Stage.Circle;
+  private readonly span: number;
+  private readonly modes: readonly KeyMode[];
+  private readonly rng: Rng;
+  private last = -1;
+
+  constructor(axes: DifficultyAxes, rng: Rng = new Rng()) {
+    this.rng = rng;
+    this.span = Math.max(1, Math.min(CIRCLE_SIZE - 1, axes.circleSpan));
+    this.modes = axes.circleModes.length > 0 ? axes.circleModes : CIRCLE_MODES;
+  }
+
+  generate(): KeyQuestion {
+    const spots = Array.from({ length: CIRCLE_SIZE }, (_, i) => i);
+    const choices = spots.filter((p) => p !== this.last);
+    const from = this.rng.choice(choices.length ? choices : spots);
+    this.last = from;
+    const clockwise = this.rng.next() < 0.5;
+    const step = clockwise ? 1 : -1;
+
+    const blanks = Array.from({ length: this.span }, (_, i) =>
+      wrapPosition(from + step * (i + 1)),
+    );
+    const way = clockwise ? "시계방향" : "반시계방향";
+    const mode = this.rng.choice(this.modes);
+    const start = circleNames(from, mode)[0];
+    const modeLabel = CIRCLE_MODE_LABEL[mode];
+
+    return {
+      kind: this.kind,
+      answerNotes: [],
+      cueNotes: [],
+      requiredPcs: new Set(),
+      optionalPcs: new Set(),
+      prompt: `${start}에서 ${way}으로 ${this.span}칸을 ${modeLabel} 이름으로 채우세요`,
+      answerText: `${modeLabel} — ${start} → ${blanks.map((p) => circleNames(p, mode).join("/")).join(" → ")}`,
+      tags: ["화성학", "5도권", modeLabel, way, `${this.span}칸`],
+      fifths: null,
+      given: `${start} · ${way} · ${modeLabel}`,
+      fields: blanks.map((p, i) => {
+        const names = circleNames(p, mode);
+        return {
+          label: `${i + 1}칸`,
+          kind: "key" as const,
+          // 모호한 자리는 둘 다 보여 준다
+          answer: names.join(" 또는 "),
+          accept: names,
+          placeholder: "",
+        };
+      }),
+      circle: { from, clockwise, blanks, mode },
+    };
+  }
+}
+
 /**
  * 음 풀 — **조가 글자를 정하고 `maxAlter`가 임시표를 정한다.**
  *
@@ -485,6 +911,15 @@ export function makeGenerator(config: SessionConfig, rng?: Rng): QuestionGenerat
   }
   if (config.stage === Stage.IntervalBuild) {
     return new IntervalBuildGenerator(axes, rng);
+  }
+  if (config.stage === Stage.Scale) {
+    return new ScaleGenerator(axes, rng);
+  }
+  if (config.stage === Stage.KeySignature) {
+    return new KeySignatureGenerator(axes, rng);
+  }
+  if (config.stage === Stage.Circle) {
+    return new CircleGenerator(axes, rng);
   }
   if (config.stage === Stage.EarChord || axes.chordPool.length > 0) {
     throw new Error("화음 문제 생성기는 아직 구현하지 않았다");

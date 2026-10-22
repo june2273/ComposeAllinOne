@@ -29,6 +29,9 @@ export const BASS_CLEF_BELOW = 60; // C4
  * 음이 덧줄 셋 아래로 내려간다.
  */
 export function clefFor(pitches: readonly Pitch[]): readonly [string, number] {
+  // 빈 배열이면 평균이 NaN이고 `NaN >= 60`은 거짓이라 **낮은음자리표로 떨어진다.**
+  // 음계를 한 음씩 쌓아 그릴 때 0음짜리 빈 오선이 그 꼴로 나왔다(실측).
+  if (pitches.length === 0) return ["G", 2];
   const middle = pitches.reduce((sum, p) => sum + p.midi, 0) / pitches.length;
   return middle >= BASS_CLEF_BELOW ? ["G", 2] : ["F", 4];
 }
@@ -46,20 +49,57 @@ function noteXml(pitch: Pitch, chord: boolean): string {
   );
 }
 
+/** 악보 하나의 머리말. part-name을 비워 두는 이유는 아래 주석 참조 */
+const SCORE_OPEN =
+  '<?xml version="1.0" encoding="UTF-8"?>' +
+  '<score-partwise version="4.0"><part-list><score-part id="P1">' +
+  // part-name을 비워 둔다. 내용을 넣으면 verovio가 악보 왼쪽에 성부
+  // 이름을 찍어 두 음짜리 그림의 균형이 깨진다.
+  "<part-name/></score-part></part-list>" +
+  '<part id="P1">';
+
+const SCORE_CLOSE = "</part></score-partwise>";
+
+/**
+ * **음표 수에 맞춰 늘린 박자표**, 그리고 감춘다.
+ *
+ * 온음표 n개를 한 마디에 담으려면 그 마디가 4n박이어야 한다 —
+ * `<divisions>1</divisions>`에서 온음표가 `<duration>4</duration>`이므로
+ * 합이 정확히 맞아야 **verovio가 오류 없이 마디를 밀어 버리는** 일을 피한다.
+ *
+ * 마디를 음마다 쪼개는 방법도 되지만(마디선은 `bar-style none`으로 감출 수 있다)
+ * 그러면 마디마다 여백이 붙어 **그림이 가로로 길쭉해지고 음표가 작아진다**(실측).
+ * 한 마디로 두면 그 여백이 통째로 사라진다.
+ */
+function stretchedTime(notes: number): string {
+  return `<time print-object="no"><beats>${notes * 4}</beats><beat-type>4</beat-type></time>`;
+}
+
+/**
+ * 첫 마디에만 넣는 `<attributes>`.
+ *
+ * **자리표는 그릴 음이 아니라 `clefFrom`이 정한다.** 음계를 한 음씩 쌓아 그릴 때
+ * 지금까지 친 음만 넘기면 **자리표가 도중에 바뀔 수 있다** — 기준은 언제나
+ * 완성된 모습이어야 한다.
+ */
+function attributesXml(
+  clefFrom: readonly Pitch[],
+  fifths: number,
+  time = "",
+): string {
+  const [sign, line] = clefFor(clefFrom);
+  return (
+    `<attributes><divisions>1</divisions><key><fifths>${fifths}</fifths></key>${time}` +
+    `<clef><sign>${sign}</sign><line>${line}</line></clef></attributes>`
+  );
+}
+
 /** 낮은 음부터 겹쳐 찍은 한 마디짜리 MusicXML. 음 하나여도 된다. */
 function staffMusicXml(pitches: readonly Pitch[], fifths: number): string {
-  const [sign, line] = clefFor(pitches);
   return (
-    '<?xml version="1.0" encoding="UTF-8"?>' +
-    '<score-partwise version="4.0"><part-list><score-part id="P1">' +
-    // part-name을 비워 둔다. 내용을 넣으면 verovio가 악보 왼쪽에 성부
-    // 이름을 찍어 두 음짜리 그림의 균형이 깨진다.
-    "<part-name/></score-part></part-list>" +
-    '<part id="P1"><measure number="1"><attributes>' +
-    `<divisions>1</divisions><key><fifths>${fifths}</fifths></key>` +
-    `<clef><sign>${sign}</sign><line>${line}</line></clef></attributes>` +
+    `${SCORE_OPEN}<measure number="1">${attributesXml(pitches, fifths)}` +
     pitches.map((p, i) => noteXml(p, i > 0)).join("") +
-    "</measure></part></score-partwise>"
+    `</measure>${SCORE_CLOSE}`
   );
 }
 
@@ -76,6 +116,49 @@ export function harmonicIntervalMusicXml(
 /** 한 음짜리. 음정 해석(음 하나를 주고 나머지를 찾게 하는 단계)이 쓴다. */
 export function singleNoteMusicXml(pitch: Pitch, fifths = 0): string {
   return staffMusicXml([pitch], fifths);
+}
+
+/**
+ * **음표 없이 조표만** 그린 오선. 조표 읽기 문제가 쓴다.
+ *
+ * `melodicMusicXml`의 "아직 아무것도 안 친" 경로를 그대로 탄다 — 음계가 첫 음을
+ * 치기 전에 그리는 빈 오선과 **같은 XML**이고, 다른 것은 `fifths`뿐이다. 그래서
+ * 마디가 넘쳐 verovio가 조용히 미는 함정을 새로 밟을 자리가 없다.
+ *
+ * **이 저장소에서 `fifths`가 0이 아닌 첫 호출이다.** 배선은 진작 있었는데
+ * (`attributesXml`이 `<key><fifths>`를 내보낸다) 아무도 쓰지 않았다.
+ */
+export function keySignatureMusicXml(fifths: number): string {
+  return melodicMusicXml([], [], fifths);
+}
+
+/**
+ * **나란히 찍은 온음표 한 줄** — 음계가 쓴다. `<chord/>`가 하나도 없다.
+ *
+ * ## 음 하나에 마디 하나다 — 한 마디에 몰아넣으면 조용히 깨진다
+ *
+ * `<divisions>1</divisions>`에서 온음표 하나(`<duration>4</duration>`)가 정확히
+ * 4/4 한 마디다. 그래서 온음표 여덟 개를 한 마디에 넣으면 **마디가 여덟 배로
+ * 넘치고, verovio는 그때 오류 없이 그 마디부터 밀어 버린다**(`loadData`는 1을
+ * 돌려주고 로그도 비어 있다 — `transcribe/musicxml.ts`와 드럼 악보가 같은 함정을
+ * 적어 두었다). 마디를 쪼개는 것이 그 함정을 피하는 유일한 길이다.
+ *
+ * 대신 **마디선과 박자표를 감춘다** — 음계는 리듬이 아니라 음높이의 줄이고,
+ * 교재의 음계 그림에도 마디선이 없다. 둘 다 verovio가 안 지키면 선이 보일 뿐
+ * 음표는 그대로이므로 기능이 깨지지는 않는다.
+ */
+export function melodicMusicXml(
+  pitches: readonly Pitch[],
+  clefFrom: readonly Pitch[] = pitches,
+  fifths = 0,
+): string {
+  // 아직 아무것도 안 친 상태 — 자리표만 있는 빈 오선. **`clefFrom`을 봐야 한다**
+  const time = stretchedTime(Math.max(1, pitches.length));
+  return (
+    `${SCORE_OPEN}<measure number="1">${attributesXml(clefFrom, fifths, time)}` +
+    pitches.map((p) => noteXml(p, false)).join("") +
+    `</measure>${SCORE_CLOSE}`
+  );
 }
 
 /**
@@ -374,5 +457,25 @@ export class ScoreRenderer {
   /** 음 하나. 자리표는 그 음이 정한다(`clefFor`) */
   renderNote(pitch: Pitch, fifths = 0): string {
     return this.draw(singleNoteMusicXml(pitch, fifths), INTERVAL_OPTIONS);
+  }
+
+  /**
+   * 나란한 온음표 한 줄(음계). `clefFrom`은 **자리표를 정할 기준**이라
+   * 한 음씩 쌓아 그릴 때도 완성된 음계를 넘긴다.
+   *
+   * `INTERVAL_OPTIONS`를 그대로 쓴다 — `breaks: "none"` + `adjustPageWidth`라
+   * 마디 여덟 개가 줄바꿈 없이 한 줄로 늘어난다.
+   */
+  renderMelody(
+    pitches: readonly Pitch[],
+    clefFrom: readonly Pitch[] = pitches,
+    fifths = 0,
+  ): string {
+    return this.draw(melodicMusicXml(pitches, clefFrom, fifths), INTERVAL_OPTIONS);
+  }
+
+  /** 조표만 있는 빈 오선. ♯·♭이 붙는 자리와 순서는 verovio가 그린다 */
+  renderKeySignature(fifths: number): string {
+    return this.draw(keySignatureMusicXml(fifths), INTERVAL_OPTIONS);
   }
 }

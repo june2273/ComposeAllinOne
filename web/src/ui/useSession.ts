@@ -34,6 +34,15 @@ export interface SessionView {
   result: Result | null;
   finished: boolean;
   results: Result[];
+  /**
+   * 지금 문제에서 **받아들인 음**(순서대로). 순차 입력 스테이지에서만 찬다.
+   *
+   * 화면은 이것의 길이만큼 악보를 그린다 — 틀린 음은 수집기가 거부해서 여기
+   * 안 들어오므로, 그린 것은 언제나 맞은 음이다.
+   */
+  played: readonly number[];
+  /** 지금 문제에서 거부된 입력 횟수. 0이 아니면 정답이 될 수 없다 */
+  mistakes: number;
 }
 
 const TICK_MS = 50;
@@ -64,6 +73,8 @@ export function useSession(
     result: null,
     finished: false,
     results: [],
+    played: [],
+    mistakes: 0,
   });
 
   const startedAt = useRef(0);
@@ -104,6 +115,8 @@ export function useSession(
         score: session.score,
         finished: session.finished,
         results: [...session.results],
+        played: [...session.progress],
+        mistakes: session.mistakes,
         ...patch,
       }));
     },
@@ -262,12 +275,29 @@ export function useSession(
           confirmTimer.current = setTimeout(() => {
             settle(session.submit(elapsed()));
           }, config.chordHoldMs) as unknown as number;
+        } else if (config.inputForm === "sequence") {
+          /*
+            **순차 입력은 확정 전에도 화면이 바뀐다.** 받아들인 음이 악보에
+            하나씩 쌓이고 거부된 입력이 실수로 세어지는데, `settle`이 부르는
+            `sync`는 채점이 끝나야 돌아서 그때까지 아무것도 안 그려진다.
+            집합 입력에서는 보일 것이 없으므로 이 분기를 지나지 않는다.
+          */
+          sync();
         }
         return;
       }
       settle(session.submit(elapsed()));
     },
-    [audio, config.chordHoldMs, config.echoBack, elapsed, session, settle],
+    [
+      audio,
+      config.chordHoldMs,
+      config.echoBack,
+      config.inputForm,
+      elapsed,
+      session,
+      settle,
+      sync,
+    ],
   );
 
   useEffect(() => () => clearTimers(), [clearTimers]);

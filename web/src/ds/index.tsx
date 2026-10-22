@@ -18,7 +18,7 @@
  * 도메인과 이어 붙이는 일은 `src/ui/`가 한다.
  */
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 
 import "../ui/styles/app.css";
 
@@ -634,6 +634,14 @@ export function NumberField({ value, active, unit }: NumberFieldProps) {
 
 export interface TextFieldProps {
   value: string;
+  /**
+   * 칸 이름 — **소리로 듣는 사람이 칸을 가리는 유일한 단서다.**
+   *
+   * 한 화면에 칸이 하나면 "답"으로 충분한데, 조표·5도권처럼 **칸이 여럿**이면
+   * 전부 "답"으로 읽혀 어느 칸에 무엇을 치는지 알 수 없다(옆에 글자를 그려
+   * 둬도 `aria-label`이 그것을 덮는다). 그래서 이름을 받는다.
+   */
+  label?: string;
   /** 비어 있을 때 회색으로 비치는 예시 */
   placeholder?: string;
   /** 칸 아래 설명 한 줄 */
@@ -658,6 +666,7 @@ export interface TextFieldProps {
  */
 export function TextField({
   value,
+  label = "답",
   placeholder,
   hint,
   disabled,
@@ -681,7 +690,7 @@ export function TextField({
         disabled={disabled}
         autoComplete="off"
         spellCheck={false}
-        aria-label="답"
+        aria-label={label}
         onChange={(event) => onChange?.(event.target.value)}
         onKeyDown={(event) => {
           if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
@@ -888,6 +897,103 @@ export function Keyboard({
   );
 }
 
+export interface RingSlot {
+  /** 눌렸다고 알릴 때 그대로 돌려주는 값 */
+  id: string;
+  /** 자리에 적힌 글자. 빈 자리면 "" */
+  label: string;
+  state: "given" | "filled" | "active" | "empty" | "wrong";
+}
+
+export interface RingProps {
+  /** **시계방향 순서 그대로.** 0번이 12시 자리다 */
+  slots: readonly RingSlot[];
+  caption?: string;
+  /** 도는 방향을 말로도 적는다 */
+  direction?: string;
+  label?: string;
+}
+
+/**
+ * 자리를 놓을 반지름 — **칸 상자의 중심이 지나는 원**이고 단위는 컨테이너의 %다.
+ *
+ * 38이면 바깥 테두리(50%) 안쪽에 칸이 들어앉는다. 더 키우면 칸이 테두리를 넘는다.
+ */
+const RING_RADIUS = 38;
+
+/**
+ * 자리를 원으로 둘러 놓는 부품 — **무엇이 적히는지 모른다.**
+ *
+ * `Keyboard`가 "어느 글자가 무슨 음인지 모르고 자리만 안다"와 같은 계약이다.
+ * 5도권이 첫 사용자지만 이 부품은 5도권을 모른다 — 반복되는 고리면 무엇이든 쓴다.
+ *
+ * ## 원그래프를 쓰지 말라는 규칙과 부딪히지 않는다
+ *
+ * `ShareBars`가 원을 물리친 근거는 **값을 각도로 부호화하지 말라**는 것이었다
+ * (각도는 길이보다 비교가 어렵고 이름표가 겹친다). 여기에는 비교할 값이 없다 —
+ * **원 자체가 내용**이라, 한 바퀴 돌면 제자리로 온다는 사실을 그림이 말한다.
+ * 막대로 펴면 가르치려는 것이 사라진다.
+ *
+ * ## SVG를 들이지 않았다
+ *
+ * 자리는 CSS `transform`으로 놓는다 — `rotate(θ) translate(-r) rotate(-θ)`면
+ * 글자가 **똑바로 선 채** 원 위에 앉는다. `ds`에 SVG를 그리는 부품을 새로 만들면
+ * 그때부터 도형 코드가 여기 쌓인다.
+ *
+ * ## 누를 수 있게 만들지 않았다
+ *
+ * **표시 전용이다.** 타이핑은 원 아래의 입력 칸이 받는다 — 절대 배치된 칸 안에서
+ * `TextField`의 IME 처리와 초점 잡기를 다시 검증할 이유가 없고, 조표 활동과
+ * 5도권이 **같은 입력 줄**을 쓰게 된다.
+ *
+ * 쓰지도 않을 `onPick`을 미리 뚫어 두지도 않았다 — `StepGrid.onCell`이 소비자
+ * 없이 남아 접근성 부채가 된 선례가 있다. 필요한 활동이 생기면 그때 소비자와
+ * 함께 넣는다. 그래서 자리는 `<li>`이고 **탭 정지가 하나도 안 는다.**
+ */
+export function Ring({ slots, caption, direction, label = "원" }: RingProps) {
+  const count = Math.max(1, slots.length);
+  return (
+    <div className="ring">
+      {caption && <p className="ring__caption">{caption}</p>}
+      {/* DOM 순서 = 12시부터 시계방향이라 읽는 순서와 보이는 순서가 같다 */}
+      <ol className="ring__face" aria-label={label}>
+        {slots.map((slot, i) => (
+          <li
+            key={slot.id}
+            className={`ring__slot ring__slot--${slot.state}`}
+            /*
+              **자리는 `left`/`top`으로 놓는다.** `transform: translate(…%)`를 쓰면
+              퍼센트가 **컨테이너가 아니라 칸 자신의 크기**를 기준으로 잡혀서 열두
+              자리가 전부 가운데로 겹친다(실측). `left`/`top`의 %만 컨테이너를 본다.
+              12시에서 시작해 시계방향이라 그리는 순서와 읽는 순서가 같다.
+            */
+            style={ringSpot(i, count)}
+            aria-current={slot.state === "active" ? "true" : undefined}
+          >
+            {slot.label}
+            {/* 빈 자리도 "몇 번째"는 말해 줘야 소리로 듣는 사람이 센다 */}
+            <span className="sr-only">
+              {`${i + 1}번 자리 ${slot.label || "빈칸"}`}
+            </span>
+          </li>
+        ))}
+      </ol>
+      {/* 화살표만 그리면 스크린리더에서 사라진다 — 글자로도 적는다 */}
+      {direction && <p className="ring__direction">{direction}</p>}
+    </div>
+  );
+}
+
+/** `i`번째 자리의 위치. 0번이 12시, 시계방향 */
+function ringSpot(i: number, count: number): CSSProperties {
+  const angle = -Math.PI / 2 + (2 * Math.PI * i) / count;
+  return {
+    left: `${50 + RING_RADIUS * Math.cos(angle)}%`,
+    top: `${50 + RING_RADIUS * Math.sin(angle)}%`,
+    transform: "translate(-50%, -50%)",
+  };
+}
+
 export interface StepperProps {
   label: string;
   /** 지금 값 — 문자열이다. 단위·부호를 붙이는 것은 위층의 일 */
@@ -966,6 +1072,14 @@ export interface StaffFigureProps {
    */
   tall?: boolean;
   /**
+   * 가로로 긴 그림 — **폭을 꽉 채운다.**
+   *
+   * 기본값은 verovio가 준 제 크기로 그린다(두 음짜리 그림은 그게 맞다). 그런데
+   * 음표가 여덟 개쯤 되면 제 크기가 종횡비 7:1쯤이라 **아주 얇고 작게** 나온다 —
+   * 그때는 칸을 채워 키우는 편이 읽힌다. 종횡비는 viewBox가 지킨다.
+   */
+  wide?: boolean;
+  /**
    * 지금 강조할 요소의 `id`들. 재생 커서가 쓴다.
    *
    * **문자열만 받는다** — 이 부품이 음표도 시각도 모르게 하기 위해서다. 어느
@@ -986,10 +1100,12 @@ export function StaffFigure({
   svg,
   fallback,
   tall,
+  wide,
   highlight,
   follow,
 }: StaffFigureProps) {
-  const className = `staff${tall ? " staff--tall" : ""}`;
+  const className =
+    `staff${tall ? " staff--tall" : ""}${wide ? " staff--wide" : ""}`;
   const host = useRef<HTMLDivElement | null>(null);
   // 붙였던 것을 떼려면 무엇을 붙였는지 기억해야 한다. 지금 강조 목록에서
   // 역산하면 SVG가 새로 그려진 사이에 사라진 요소를 놓친다.

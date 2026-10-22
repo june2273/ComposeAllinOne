@@ -52,8 +52,6 @@ import {
 /** 스템 이름을 사람이 읽는 말로. 이 표가 도메인 지식의 전부다 */
 const STEM_LABELS: Record<string, string> = {
   vocals: "보컬",
-  // 들어보기용. 전사는 여전히 위 `vocals`(htdemucs)를 쓴다 — server/app/roformer.py
-  vocals_roformer: "보컬 (RoFormer)",
   drums: "드럼",
   bass: "베이스",
   other: "그 외",

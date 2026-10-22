@@ -24,7 +24,14 @@
  * 태우려 하지 말 것 — 문제 큐·제한시간·정답 판정이 전부 맞지 않는다.
  */
 
-import { INTERMEDIATE, INTERVALS, type SessionConfig } from "./config";
+import {
+  CIRCLE_OF_FIFTHS,
+  INTERMEDIATE,
+  INTERVALS,
+  KEY_SIGNATURE,
+  SCALE,
+  type SessionConfig,
+} from "./config";
 
 export const Domain = {
   Ear: "청음",
@@ -169,6 +176,57 @@ const HARMONY: Activity[] = [
     ],
   },
   {
+    id: "harmony.scale",
+    domain: Domain.Harmony,
+    kind: Kind.Quiz,
+    title: "음계",
+    summary: "음계 이름을 보고 건반으로 상행 8음을 순서대로 친다.",
+    status: Status.Ready,
+    config: SCALE,
+    needsMidi: true,
+    features: [
+      "'D Major scale'을 주면 레 미 파♯ 솔 라 시 도♯ 레를 차례로 친다",
+      "한 음 칠 때마다 온음표로 악보에 찍혀서 다 치면 음계 한 줄이 남는다",
+      "틀린 음은 받지 않는다 — 악보도 진행도 안 움직이고 맞을 때까지 다시 친다",
+      "음계 종류 — 장음계 · Natural minor · Harmonic minor · Melodic minor · 전부 섞어서",
+      "Harmonic minor는 Natural minor의 7음을, Melodic minor는 6·7음을 반음 올린 것",
+      "12조 전부 나온다. **조표가 아니라 임시표**로 그린다 — 조표는 따로 다룬다",
+      "MIDI 건반이 없으면 화면 건반을 마우스로 눌러도 된다",
+    ],
+  },
+  {
+    id: "harmony.keysig",
+    domain: Domain.Harmony,
+    kind: Kind.Quiz,
+    title: "조표",
+    summary: "조표를 보고 조를 읽고, 거꾸로 조에서 조표를 쓴다.",
+    status: Status.Ready,
+    config: KEY_SIGNATURE,
+    features: [
+      "오선지에 ♯이 둘이면 'D' — 그 조표의 으뜸음 이름을 친다",
+      "유형 — 장조 으뜸음 · 단조 으뜸음 · 둘 다 · 조→조표 · 이명동음조",
+      "'조→조표'는 붙는 음이름을 순서대로 친다 — ♯2면 'F C'(파도솔레라미시)",
+      "이명동음조는 **♯ 개수 + ♭ 개수 = 12** 하나로 외운다. ♯5↔♭7 · ♯6↔♭6 · ♯7↔♭5",
+      "이름 표기는 너그럽다 — D · d · D Major · D장조가 전부 같은 답이다",
+      "표 보기를 켜면 이명동음조 세 쌍이 덧셈과 함께 나온다",
+    ],
+  },
+  {
+    id: "harmony.circle",
+    domain: Domain.Harmony,
+    kind: Kind.Quiz,
+    title: "5도권",
+    summary: "원의 한 자리를 주면 이어지는 자리를 채운다.",
+    status: Status.Ready,
+    config: CIRCLE_OF_FIFTHS,
+    features: [
+      "G에서 시계방향이면 D - A - E - B … 로 이어 간다",
+      "빈칸 수를 4~6칸에서 고른다. 방향은 문제마다 섞인다",
+      "B/C♭ · F♯/G♭ · C♯/D♭ 세 자리는 **어느 이름으로 써도 정답**이다",
+      "그 세 자리가 ♯계와 ♭계가 만나 원이 닫히는 곳 — 이명동음조와 같은 사실이다",
+    ],
+  },
+  {
     id: "harmony.triad",
     domain: Domain.Harmony,
     kind: Kind.Quiz,
@@ -185,12 +243,13 @@ const HARMONY: Activity[] = [
     id: "harmony.key_diatonic",
     domain: Domain.Harmony,
     kind: Kind.Quiz,
-    title: "조표 다이아토닉",
+    title: "다이아토닉 화음",
     summary: "조표를 읽고 그 조의 다이아토닉 화음을 답한다.",
     status: Status.Planned,
-    features: ["조표 읽기", "으뜸조/나란한조", "다이아토닉 7화음", "로마자"],
+    features: ["다이아토닉 3화음·7화음", "로마자", "조표는 '조표' 활동에서 따로 익힌다"],
     requires: [
-      "조(key) 개념이 필요 — allowedPitchClasses는 임시 형태다",
+      "화음 자료구조 — 근음에서 도수로 쌓는 ChordSpec (3화음·7화음과 공유한다)",
+      "조표 읽기는 이제 있다 (harmony/keys.ts) — 여기 남은 것은 화음뿐이다",
       "로마자 분석 라이브러리 도입을 여기서 검토할 것",
     ],
   },
@@ -227,7 +286,10 @@ const HARMONY: Activity[] = [
     summary: "7가지 교회선법을 듣고, 읽고, 구별한다.",
     status: Status.Planned,
     features: ["이오니안~로크리안", "특성음", "모달 인터체인지"],
-    requires: ["스케일 생성기 + 특성음 강조 재생"],
+    requires: [
+      "스케일 생성기는 이제 있다 (harmony/scales.ts) — 패턴 배열에 일곱 줄을 더하면 된다",
+      "남은 것은 특성음 강조 재생 — AudioBackend.playSequence가 음마다 velocity를 받는다",
+    ],
   },
   {
     id: "harmony.free_piano",

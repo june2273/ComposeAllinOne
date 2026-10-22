@@ -46,16 +46,30 @@ import {
   type IntervalResponse,
   type QualityResponse,
   type Question,
+  type FieldsResponse,
+  type KeyQuestion,
+  type ScaleQuestion,
   isIntervalBuildQuestion,
   isIntervalQuestion,
+  isKeyQuestion,
+  isScaleQuestion,
 } from "../core/questions";
+import {
+  CIRCLE_MODE_LABEL,
+  CIRCLE_SIZE,
+  ENHARMONIC,
+  circleNames,
+  keyAt,
+  signatureLabel,
+} from "../core/harmony/keys";
+import { scaleName } from "../core/harmony/scales";
 import {
   type IntervalAnswer,
   parseIntervalAnswer,
   qualityLadder,
 } from "../core/theory";
-import { Hint, Matrix, type MatrixProps, NumberField, TextField } from "../ds";
-import { Staff } from "./components";
+import { Hint, Matrix, type MatrixProps, NumberField, Ring, TextField } from "../ds";
+import { KeySignatureStaff, MelodyStaff, Staff } from "./components";
 
 export interface StageProps {
   question: Question;
@@ -67,6 +81,10 @@ export interface StageProps {
   maxNumber?: number;
   /** 음 하나에 붙은 임시표 수의 상한. 사다리 표의 폭을 정한다 */
   maxAlter?: number;
+  /** 순차 입력에서 지금까지 받아들인 음. 음계가 악보를 여기까지 그린다 */
+  played?: readonly number[];
+  /** 순차 입력에서 거부된 입력 횟수 */
+  mistakes?: number;
   onAnswer: (response: unknown) => void;
 }
 
@@ -518,6 +536,229 @@ export function IntervalBuildStage({ question, locked }: StageProps) {
   );
 }
 
+// --- 음계 — 순서대로 친다 ---------------------------------------------------------
+
+/**
+ * 음계 연주 — 이름을 주면 **건반으로 상행 8음을 차례로** 친다.
+ *
+ * 한 음이 받아들여질 때마다 그 음이 온음표로 찍혀서, 여덟 번째를 치면 음계
+ * 한 줄이 악보에 남는다. **틀린 음은 안 찍힌다** — 수집기가 거부하므로 화면에
+ * 올라오는 `played`에는 맞은 음만 들어 있다.
+ *
+ * **이 화면에는 입력이 없다.** 답은 `QuizPage`가 건반(MIDI·자판·가상 건반)에서
+ * 받아 `Session.collect()`로 넣는다 — 음정 해석과 같은 모양이고, 그래서 락아웃
+ * 규칙이 그대로 걸린다.
+ */
+export function ScaleStage({ question, locked, played = [], mistakes = 0 }: StageProps) {
+  if (!isScaleQuestion(question)) return null;
+  const q: ScaleQuestion = question;
+  const done = played.length;
+  const next = done < q.pitches.length ? q.pitches[done] : null;
+
+  return (
+    <div className="stack">
+      <MelodyStaff pitches={q.pitches.slice(0, done)} clefFrom={q.pitches} />
+      <p className="given">{scaleName(q.tonic, q.scaleKind)}</p>
+      <p className="scale__count">
+        {done} / {q.pitches.length}
+        {mistakes > 0 && <span className="scale__miss"> · 틀린 입력 {mistakes}회</span>}
+      </p>
+      <Hint>
+        {locked
+          ? ""
+          : next
+            ? `${done === 0 ? "으뜸음" : `${done + 1}번째 음`}부터 — 건반에서 차례로 누르세요`
+            : ""}
+      </Hint>
+    </div>
+  );
+}
+
+// --- 조표 · 5도권 — 칸을 채운다 -----------------------------------------------
+
+/**
+ * 칸 N개를 한꺼번에 보이고 **아무 칸에서든 Enter면 제출**한다.
+ *
+ * 자동으로 다음 칸으로 넘기는 장치를 만들지 않는다 — DOM 순서가 곧 묻는 순서라
+ * Tab이 그대로 맞고, 겹음정에서 "칸이 차면 넘어간다"가 어떻게 깨졌는지 이미 겪었다.
+ *
+ * **빈 칸이 남아 있으면 제출하지 않는다.** 덜 채운 것과 틀린 것은 다르고, 덜 채운
+ * 채로 오답을 먹으면 무엇을 틀렸는지 알 수 없다.
+ */
+interface FieldsState {
+  values: readonly string[];
+  error: string;
+  /** Enter로 제출이 확정됐다. 실제 제출은 이펙트가 한다 (아래 주석) */
+  sent: boolean;
+}
+
+type FieldsAction =
+  | { type: "reset"; count: number }
+  | { type: "set"; at: number; value: string }
+  | { type: "submit" };
+
+/**
+ * 입력 상태를 순수 함수 하나로 모은다.
+ *
+ * **`useState`로 두면 안 된다**(실측, 이 저장소에서 두 번째다). 글자와 Enter가
+ * **한 태스크에 묶여 들어오면**(자동 입력·빠른 연타·테스트의 연속 dispatch) React가
+ * 상태 갱신을 모아 처리해서, Enter 핸들러의 클로저가 **아직 빈 값**을 본다 —
+ * "빈 칸을 채우세요"만 뜨고 제출이 영영 안 된다. 브라우저에서 실제로 그랬다.
+ * 리듀서는 늘 최신 상태를 받으므로 판단을 그쪽에 둔다.
+ */
+function reduceFields(state: FieldsState, action: FieldsAction): FieldsState {
+  switch (action.type) {
+    case "reset":
+      return { values: Array.from({ length: action.count }, () => ""), error: "", sent: false };
+    case "set":
+      return {
+        ...state,
+        values: state.values.map((v, i) => (i === action.at ? action.value : v)),
+        error: "",
+      };
+    case "submit":
+      return state.values.some((v) => v.trim() === "")
+        ? { ...state, error: "빈 칸을 모두 채운 뒤 Enter" }
+        : { ...state, sent: true };
+  }
+}
+
+function KeyFields({
+  question,
+  locked,
+  onAnswer,
+}: {
+  question: KeyQuestion;
+  locked: boolean;
+  onAnswer: (response: unknown) => void;
+}) {
+  const count = question.fields.length;
+  const [input, dispatch] = useReducer(reduceFields, {
+    values: Array.from({ length: count }, () => ""),
+    error: "",
+    sent: false,
+  });
+  const key = question.answerText;
+
+  useEffect(() => {
+    dispatch({ type: "reset", count });
+  }, [count, key]);
+
+  // 판단은 리듀서가 하고 **내보내는 것만** 여기서 한다
+  useEffect(() => {
+    if (!input.sent || locked) return;
+    onAnswer({ form: "fields", values: [...input.values] } satisfies FieldsResponse);
+  }, [input.sent, input.values, locked, onAnswer]);
+
+  return (
+    <div className="keysig__fields">
+      {question.fields.map((field, i) => (
+        <label className="keysig__field" key={field.label}>
+          <span className="keysig__name">{field.label}</span>
+          <TextField
+            value={input.values[i] ?? ""}
+            // 칸이 여럿이라 전부 "답"으로 읽히면 어느 칸인지 알 수 없다
+            label={field.label}
+            placeholder={field.placeholder}
+            hint={locked ? "" : i === 0 ? input.error : ""}
+            disabled={locked}
+            // **활성 칸에만 focusKey를 준다** — 전부 주면 새 문제가 뜰 때 칸들이
+            // 서로 초점을 빼앗는다(`TextField`가 focusKey가 바뀌면 스스로 잡는다)
+            focusKey={i === 0 ? key : undefined}
+            onChange={(value) => dispatch({ type: "set", at: i, value })}
+            onSubmit={() => dispatch({ type: "submit" })}
+          />
+        </label>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * 조표 — 오선지의 ♯·♭을 읽거나, 조 이름에서 조표를 쓴다.
+ *
+ * 다섯 유형이 **같은 화면**을 쓴다. 조표 그림을 줄 때만 오선지가 나오고
+ * (`fifths !== null`), 조 이름을 줄 때는 글자만 나온다.
+ */
+export function KeySignatureStage({ question, locked, showTable, onAnswer }: StageProps) {
+  if (!isKeyQuestion(question)) return null;
+  const q: KeyQuestion = question;
+  return (
+    <div className="stack">
+      {q.fifths !== null && <KeySignatureStaff fifths={q.fifths} />}
+      {q.given !== "" && <p className="given">{q.given}</p>}
+      <KeyFields question={q} locked={locked} onAnswer={onAnswer} />
+      <Hint>{locked ? "" : q.prompt}</Hint>
+      {showTable && <EnharmonicTable />}
+    </div>
+  );
+}
+
+/**
+ * 5도권 — 한 자리를 주고 이어지는 자리를 채운다.
+ *
+ * 12자리를 **전부 그린다.** 원을 익히는 것이 목적이라 묻지 않는 자리도 보여야
+ * "한 바퀴"가 눈에 들어온다.
+ */
+export function CircleStage({ question, locked, onAnswer }: StageProps) {
+  if (!isKeyQuestion(question) || !question.circle) return null;
+  const q: KeyQuestion = question;
+  const shape = q.circle!;
+  const slots = Array.from({ length: CIRCLE_SIZE }, (_, p) => {
+    const at = shape.blanks.indexOf(p);
+    return {
+      id: String(p),
+      label: p === shape.from ? circleNames(p, shape.mode)[0] : "",
+      state:
+        p === shape.from
+          ? ("given" as const)
+          : at >= 0
+            ? ("active" as const)
+            : ("empty" as const),
+    };
+  });
+
+  return (
+    <div className="stack">
+      <Ring
+        slots={slots}
+        label={`5도권 (${CIRCLE_MODE_LABEL[shape.mode]})`}
+        /*
+          **조성을 원 위에 적는다.** 자리가 장조·단조에서 똑같아서(나란한조가 같은
+          칸에 앉는다) 그림만으로는 어느 이름을 쓸지 알 수 없다 — 주어진 자리 한
+          칸이 유일한 단서인데 그것만 보고 추측하게 만들 이유가 없다.
+        */
+        caption={`${CIRCLE_MODE_LABEL[shape.mode]} 이름으로 채웁니다`}
+        direction={`${shape.clockwise ? "시계방향 ↻" : "반시계방향 ↺"} · ${shape.blanks.length}칸`}
+      />
+      <KeyFields question={q} locked={locked} onAnswer={onAnswer} />
+      <Hint>{locked ? "" : q.prompt}</Hint>
+    </div>
+  );
+}
+
+/**
+ * 이명동음조 참고표 — **덧셈 하나로 줄여 보인다.**
+ *
+ * 세 쌍을 따로 외우지 않게 하는 것이 이 표의 전부다. `♯ 개수 + ♭ 개수 = 12`와
+ * "글자가 한 칸 올라가고 ♭이 붙는다" 둘만 남으면 된다.
+ */
+export function EnharmonicTable() {
+  return (
+    <div className="tables">
+      <Matrix
+        caption="이명동음조 — ♯ 개수 + ♭ 개수 = 12"
+        columns={["♯쪽", "♭쪽", "합"]}
+        rows={ENHARMONIC.map(([sharp, flat]) => [
+          `${signatureLabel(sharp)}  ${keyAt(sharp).major} / ${keyAt(sharp).minor}`,
+          `${signatureLabel(flat)}  ${keyAt(flat).major} / ${keyAt(flat).minor}`,
+          `${sharp} + ${-flat} = 12`,
+        ])}
+      />
+    </div>
+  );
+}
+
 const STAGE_VIEWS: Partial<
   Record<Stage, (props: StageProps) => ReactElement | null>
 > = {
@@ -525,6 +766,9 @@ const STAGE_VIEWS: Partial<
   [Stage.IntervalTable]: IntervalTableStage,
   [Stage.IntervalId]: IntervalStage,
   [Stage.IntervalBuild]: IntervalBuildStage,
+  [Stage.Scale]: ScaleStage,
+  [Stage.KeySignature]: KeySignatureStage,
+  [Stage.Circle]: CircleStage,
 };
 
 export function stageFor(stage: Stage) {
@@ -547,6 +791,7 @@ const KEYBOARD_STAGES: ReadonlySet<Stage> = new Set([
   Stage.EarSingle,
   Stage.EarChord,
   Stage.IntervalBuild,
+  Stage.Scale,
 ]);
 
 export function usesMidiInput(stage: Stage): boolean {
@@ -555,5 +800,5 @@ export function usesMidiInput(stage: Stage): boolean {
 
 /** 이 스테이지에 참고표가 있는가. 옵션 화면이 "표 보기"를 낼지 정한다. */
 export function usesTable(stage: Stage): boolean {
-  return stage === Stage.IntervalTable;
+  return stage === Stage.IntervalTable || stage === Stage.KeySignature;
 }

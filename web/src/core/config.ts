@@ -1,12 +1,16 @@
 /**
  * 세션 설정 — 기술검토서 6절의 난이도 8축과 그 프리셋.
  *
- * 이 모듈은 프로젝트 안의 어떤 것에도 의존하지 않는다(의존성 그래프의 뿌리).
- * questions·grading·audio·session이 전부 여기를 바라보므로, 여기서 무언가를
- * import하면 순환이 생긴다.
+ * 이 모듈은 거의 뿌리다 — questions·grading·audio·session이 전부 여기를 바라보므로
+ * **여기서 import하는 것은 반드시 더 아래여야 한다.** 지금 하나뿐이고
+ * (`harmony/scales`의 `ScaleKind`) 그쪽은 `theory.ts`만 보므로 어느 방향으로도
+ * 순환이 없다. **config를 import하는 모듈을 여기서 들여오지 말 것.**
  *
  * "초급/중급/고급"은 난이도 값이 아니라 **축 값들의 묶음에 붙인 이름**일 뿐이다.
  */
+
+import { CIRCLE_MODES, KEY_KINDS, KeyKind, type KeyMode } from "./harmony/keys";
+import { SCALE_KINDS, ScaleKind } from "./harmony/scales";
 
 /** 기술검토서 7절의 AudioBackend 인터페이스가 이 값을 그대로 쓴다. */
 export type PlayMode = "block" | "arpeggio_up" | "melody";
@@ -40,6 +44,9 @@ export const Stage = {
   IntervalTable: "interval_table",   // 온음계적 음정표 외우기 (화면 입력)
   IntervalId: "interval_id",         // 온음계적 음정 구분 (화면 입력)
   IntervalBuild: "interval_build",   // 음정 해석 — 음을 쌓는다 (건반 입력)
+  Scale: "scale",                    // 음계 연주 — 순서대로 친다 (건반 입력)
+  KeySignature: "key_signature",     // 조표 읽기·쓰기 (글자 입력)
+  Circle: "circle",                  // 5도권 채우기 (글자 입력)
 } as const;
 export type Stage = (typeof Stage)[keyof typeof Stage];
 
@@ -53,6 +60,8 @@ export const GradingMode = {
   IntervalCount: "interval_count",     // 도수 + 온음계적 반음 개수
   IntervalQuality: "interval_quality", // 성질만 (도수·반음은 문제가 알려준다)
   IntervalForm: "interval_form",       // 도수 + 성질
+  Scale: "scale",                      // 음계 — 순서가 맞고 실수가 0인가
+  KeyField: "key_field",               // 조표·5도권 — 칸마다 맞는가
 } as const;
 export type GradingMode = (typeof GradingMode)[keyof typeof GradingMode];
 
@@ -88,6 +97,24 @@ export interface DifficultyAxes {
   maxAlter: number;
   /** 도수 상한. 8 = 홑음정, 13 = 겹음정 */
   maxIntervalNumber: number;
+
+  /**
+   * 낼 음계 종류. **비어 있으면 음계 스테이지가 아니다**(`chordPool`의 짝).
+   * 둘 이상이면 한 세션에 섞여 나온다.
+   */
+  scalePool: readonly ScaleKind[];
+
+  /** 조표 활동이 낼 유형. 조표 스테이지가 아니면 뜻이 없다 */
+  keyKind: KeyKind;
+  /** 5도권 한 문제의 빈칸 수 */
+  circleSpan: number;
+  /**
+   * 5도권을 어느 이름으로 채우는가. 둘이면 문제마다 섞여 나온다.
+   *
+   * **자리는 장조·단조가 똑같다**(나란한조가 같은 칸에 앉는다) — 이 축이 바꾸는
+   * 것은 칸에 적는 이름뿐이다.
+   */
+  circleModes: readonly KeyMode[];
 }
 
 export const DEFAULT_AXES: DifficultyAxes = {
@@ -102,6 +129,10 @@ export const DEFAULT_AXES: DifficultyAxes = {
   grading: GradingMode.AbsolutePitch,
   maxAlter: 0,
   maxIntervalNumber: 8,
+  scalePool: [],
+  keyKind: KeyKind.Major,
+  circleSpan: 4,
+  circleModes: ["major"],
 };
 
 export function axesAllow(axes: DifficultyAxes, midiNote: number): boolean {
@@ -134,6 +165,14 @@ export interface SessionConfig {
   chordHoldMs: number;
   echoBack: boolean;                     // 기술검토서 10절 권장: OFF
   /**
+   * 입력의 형태 — `Session`이 수집기를 고르는 축이다.
+   *
+   * `"set"`은 화음처럼 **한 덩어리**로 받고(조용해지면 확정), `"sequence"`는
+   * 음계처럼 **한 음씩 순서대로** 받는다(다 차면 확정, 틀린 음은 거부).
+   * 자세한 것은 `session.InputCollector` 주석.
+   */
+  inputForm: "set" | "sequence";
+  /**
    * 참고표(음정표)를 화면에 띄운다. **연습용 보조 장치**라 기본은 꺼짐이고,
    * 표가 있는 스테이지에서만 옵션으로 노출된다(`stages.usesTable()`).
    */
@@ -148,6 +187,7 @@ const BASE: Omit<SessionConfig, "stage" | "difficulty"> = {
   feedbackMs: 1200,
   chordHoldMs: 0,
   echoBack: false,
+  inputForm: "set",
   showTable: false,
 };
 
@@ -244,6 +284,67 @@ export const INTERVAL_BUILD: SessionConfig = {
 };
 
 /**
+ * 음계 연주 — 음계 이름을 주면 **건반으로 상행 8음을 순서대로** 친다.
+ *
+ * 음역이 C4~B5인 것은 계산해서 나온 값이다: 으뜸음을 옥타브 4에 두면 12조 ×
+ * 4종류 48개 음계가 정확히 60~83에 들어간다(B 장음계의 꼭대기가 B5 = 83).
+ *
+ * - `inputForm: "sequence"` — 이 설정 하나가 `Session`의 수집기를 갈아끼운다.
+ * - `echoBack: true` — **연주가 과제 자체**라 친 음이 들려야 한다. 전 스테이지에서
+ *   꺼져 있는 축인데 여기서만 켠다(기술검토서 10절도 청음에서만 OFF를 권한다).
+ * - `allowedPitchClasses: null` — 조성 축은 음계가 스스로 정한다.
+ * - 제한시간이 긴 것은 여덟 음을 **찾아서** 치는 시간이기 때문이다.
+ */
+export const SCALE: SessionConfig = {
+  ...BASE,
+  stage: Stage.Scale,
+  inputForm: "sequence",
+  echoBack: true,
+  feedbackMs: 2600,          // 완성된 음계를 눈에 남길 시간
+  difficulty: {
+    ...DEFAULT_AXES,
+    noteLow: 60,             // C4
+    noteHigh: 83,            // B5
+    allowedPitchClasses: null,
+    timeLimitSec: 40,
+    grading: GradingMode.Scale,
+    scalePool: [ScaleKind.Major],
+  },
+};
+
+/**
+ * 조표 — 오선지의 ♯·♭을 읽고 조를 말하거나, 거꾸로 조에서 조표를 쓴다.
+ *
+ * **건반을 안 쓴다**(`KEYBOARD_STAGES`에 넣지 않는다) — 답이 글자라 자판이
+ * 입력 칸으로 바로 가야 한다. 소리도 안 난다: 조표는 보는 것이지 듣는 것이 아니다.
+ */
+export const KEY_SIGNATURE: SessionConfig = {
+  ...BASE,
+  stage: Stage.KeySignature,
+  feedbackMs: 2600,
+  difficulty: {
+    ...DEFAULT_AXES,
+    timeLimitSec: 30,
+    grading: GradingMode.KeyField,
+    keyKind: KeyKind.Major,
+  },
+};
+
+/** 5도권 — 한 자리를 주면 이어지는 자리를 채운다 */
+export const CIRCLE_OF_FIFTHS: SessionConfig = {
+  ...BASE,
+  stage: Stage.Circle,
+  feedbackMs: 3000,          // 채운 원을 눈에 남길 시간
+  difficulty: {
+    ...DEFAULT_AXES,
+    timeLimitSec: 45,        // 네 칸 이상을 치는 시간
+    grading: GradingMode.KeyField,
+    circleSpan: 4,
+    circleModes: ["major"],
+  },
+};
+
+/**
  * "단계" 옵션이 고르는 셋. **순서가 곧 학습 순서다** — 옵션의 눈금 번호가
  * 그대로 이 배열의 인덱스다. (음정 해석은 여기 없다 — 단계가 아니라 방향이라
  * 별도 옵션이 고른다.)
@@ -273,6 +374,30 @@ const INTERVAL_STAGES: ReadonlySet<Stage> = new Set([
 export function isIntervalStage(stage: Stage): boolean {
   return INTERVAL_STAGES.has(stage);
 }
+
+/** 음계 스테이지인가. 옵션 화면이 "음계 종류"를 낼지 정하는 조건이 여기 하나다 */
+export function isScaleStage(stage: Stage): boolean {
+  return stage === Stage.Scale;
+}
+
+/** "전부 섞어서" 눈금. 종류 넷 **다음** 칸이다 */
+export const SCALE_MIX = SCALE_KINDS.length;
+
+/** 조표 스테이지인가. 옵션 화면이 "유형"을 낼지 정하는 조건이 여기 하나다 */
+export function isKeySignatureStage(stage: Stage): boolean {
+  return stage === Stage.KeySignature;
+}
+
+/** 5도권 스테이지인가 */
+export function isCircleStage(stage: Stage): boolean {
+  return stage === Stage.Circle;
+}
+
+/** 5도권 빈칸 수 눈금. 사용자가 고른 4~6칸 */
+export const CIRCLE_SPANS: readonly number[] = [4, 5, 6];
+
+/** 5도권 "둘 다 섞어서" 눈금. 장조·단조 **다음** 칸이다(`SCALE_MIX`와 같은 수법) */
+export const CIRCLE_MIX = CIRCLE_MODES.length;
 
 /** 겹음정을 켰을 때의 음역 상한. E6 — 2옥타브가 있어야 13도 쌍이 넉넉히 나온다 */
 const COMPOUND_NOTE_HIGH = 88;
@@ -317,6 +442,21 @@ export interface PracticeOptions {
   readonly bassClef: boolean;
   /** 음정 해석 — 음정을 읽는 대신 건반에서 만든다 */
   readonly build: boolean;
+
+  /**
+   * 음계 종류 — `SCALE_KINDS`의 눈금 번호. **마지막 칸(= 길이)이 "전부 섞어서"다.**
+   *
+   * 토글을 따로 두지 않은 것은 "종류를 골라 놨는데 섞기가 켜져 있는" 모순 상태를
+   * 만들지 않기 위해서다. 제한시간·라운드의 마지막 칸이 무한인 것과 같은 수법이다.
+   */
+  readonly scaleKind: number;
+
+  /** 조표 유형 — `KEY_KINDS`의 눈금 번호 */
+  readonly keyKind: number;
+  /** 5도권 빈칸 수 — `CIRCLE_SPANS`의 눈금 번호 */
+  readonly circleSpan: number;
+  /** 5도권 조성 — `CIRCLE_MODES`의 눈금 번호. **마지막 칸이 "섞어서"다** */
+  readonly circleMode: number;
 }
 
 /** 음정 활동이 아닌 곳에서 쓰는 옵션 기본값 */
@@ -329,6 +469,10 @@ export const DEFAULT_OPTIONS: PracticeOptions = {
   compound: false,
   bassClef: false,
   build: false,
+  scaleKind: 0,
+  keyKind: 0,
+  circleSpan: 0,
+  circleMode: 0,
 };
 
 /**
@@ -369,6 +513,20 @@ export function stepIndex(
   return best;
 }
 
+/** 음계 풀 → 눈금 번호. 둘 이상이면 섞기 칸이다 */
+function scaleKindStep(pool: readonly ScaleKind[]): number {
+  if (pool.length !== 1) return pool.length > 1 ? SCALE_MIX : DEFAULT_OPTIONS.scaleKind;
+  const at = SCALE_KINDS.indexOf(pool[0]);
+  return at < 0 ? DEFAULT_OPTIONS.scaleKind : at;
+}
+
+/** `circleModes` → 눈금 번호. `scaleKindStep`과 같은 규칙이다 */
+function circleModeStep(pool: readonly KeyMode[]): number {
+  if (pool.length !== 1) return pool.length > 1 ? CIRCLE_MIX : DEFAULT_OPTIONS.circleMode;
+  const at = CIRCLE_MODES.indexOf(pool[0]);
+  return at < 0 ? DEFAULT_OPTIONS.circleMode : at;
+}
+
 export function optionsOf(config: SessionConfig): PracticeOptions {
   const level = LEVEL_CONFIGS.findIndex((c) => c.stage === config.stage);
   return {
@@ -380,6 +538,10 @@ export function optionsOf(config: SessionConfig): PracticeOptions {
     compound: config.difficulty.maxIntervalNumber > SIMPLE_MAX_NUMBER,
     bassClef: config.difficulty.noteLow < DIATONIC_AXES.noteLow,
     build: config.stage === Stage.IntervalBuild,
+    scaleKind: scaleKindStep(config.difficulty.scalePool),
+    keyKind: Math.max(0, KEY_KINDS.indexOf(config.difficulty.keyKind)),
+    circleSpan: Math.max(0, CIRCLE_SPANS.indexOf(config.difficulty.circleSpan)),
+    circleMode: circleModeStep(config.difficulty.circleModes),
   };
 }
 
@@ -419,6 +581,22 @@ export function withOptions(
       : SIMPLE_MAX_NUMBER;
     if (options.compound) difficulty.noteHigh = COMPOUND_NOTE_HIGH;
     if (options.bassClef) difficulty.noteLow = BASS_NOTE_LOW;
+  }
+  if (isScaleStage(base.stage)) {
+    difficulty.scalePool =
+      options.scaleKind >= SCALE_MIX
+        ? SCALE_KINDS
+        : [SCALE_KINDS[options.scaleKind] ?? SCALE_KINDS[0]];
+  }
+  if (isKeySignatureStage(base.stage)) {
+    difficulty.keyKind = KEY_KINDS[options.keyKind] ?? KEY_KINDS[0];
+  }
+  if (isCircleStage(base.stage)) {
+    difficulty.circleSpan = CIRCLE_SPANS[options.circleSpan] ?? CIRCLE_SPANS[0];
+    difficulty.circleModes =
+      options.circleMode >= CIRCLE_MIX
+        ? CIRCLE_MODES
+        : [CIRCLE_MODES[options.circleMode] ?? CIRCLE_MODES[0]];
   }
 
   return {

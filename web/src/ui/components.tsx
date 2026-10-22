@@ -8,6 +8,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { type DeviceState, DeviceStatus, StaffFigure } from "../ds";
+import { signatureLabel } from "../core/harmony/keys";
 import { ScoreRenderer } from "../core/score";
 import type { Pitch } from "../core/theory";
 import type { MidiStatus } from "../platform/midi";
@@ -66,6 +67,79 @@ export function MidiRow({
  *
  * 음자리표는 여기서 정하지 않는다 — `score.clefFor`가 음의 높이를 보고 고른다.
  */
+/**
+ * 음계처럼 **여러 음을 나란히** 그린다. 친 만큼만 넘기면 그만큼만 찍힌다.
+ *
+ * `clefFrom`이 따로 있는 이유: 자리표는 **완성된 모습**으로 정해야 한다. 지금까지
+ * 친 음만 보고 정하면 낮은 음 몇 개만 찍힌 동안 낮은음자리표였다가 도중에 바뀐다.
+ *
+ * **앞 그림을 지우지 않는다.** `Staff`는 음이 바뀔 때마다 `setSvg(null)`을 불러
+ * 폴백 글자를 한 번 보이는데, 여기서는 음을 칠 때마다 그래서 악보가 깜빡인다.
+ * 새 SVG가 올 때까지 이전 것을 그대로 두면 한 음씩 **쌓이는 것처럼** 보인다.
+ */
+export function MelodyStaff({
+  pitches,
+  clefFrom = pitches,
+}: {
+  pitches: readonly Pitch[];
+  clefFrom?: readonly Pitch[];
+}) {
+  const [svg, setSvg] = useState<string | null>(null);
+  const key = pitches.map((p) => p.name).join(" ");
+  const latest = useRef(key);
+
+  useEffect(() => {
+    latest.current = key;
+    let cancelled = false;
+    ScoreRenderer.load()
+      .then((renderer) => {
+        if (cancelled || latest.current !== key) return;
+        setSvg(renderer.renderMelody(pitches, clefFrom));
+      })
+      .catch((err) => {
+        console.error("악보 렌더 실패:", err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [clefFrom, key, pitches]);
+
+  return <StaffFigure svg={svg} fallback={key} wide />;
+}
+
+/**
+ * **조표만** 있는 빈 오선. 조표 읽기 문제가 쓴다.
+ *
+ * 캐시 키가 `fifths`다. `Staff`·`MelodyStaff`는 음이름으로 키를 만드는데 여기는
+ * 음표가 없어서 **그 방식이면 모든 문제의 키가 같아져 악보가 영영 안 바뀐다.**
+ */
+export function KeySignatureStaff({ fifths }: { fifths: number }) {
+  const [svg, setSvg] = useState<string | null>(null);
+  const latest = useRef(fifths);
+
+  useEffect(() => {
+    latest.current = fifths;
+    let cancelled = false;
+    ScoreRenderer.load()
+      .then((renderer) => {
+        if (cancelled || latest.current !== fifths) return;
+        setSvg(renderer.renderKeySignature(fifths));
+      })
+      .catch((err) => {
+        console.error("악보 렌더 실패:", err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [fifths]);
+
+  /*
+    악보가 뜨기 전 몇 초를 메우는 글자다 — **거기에 `-3`을 적으면 안 된다.**
+    조표를 읽는 활동에서 날숫자는 ♯인지 ♭인지를 말해 주지 않는다.
+  */
+  return <StaffFigure svg={svg} fallback={signatureLabel(fifths)} />;
+}
+
 export function Staff({ lower, upper }: { lower: Pitch; upper?: Pitch }) {
   const [svg, setSvg] = useState<string | null>(null);
   const key = upper ? `${lower.name}-${upper.name}` : lower.name;

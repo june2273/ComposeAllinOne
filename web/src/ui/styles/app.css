@@ -516,6 +516,10 @@ button {
   max-height: 170px;
   height: auto;
 }
+/* 음계처럼 가로로 긴 그림. 제 크기로 두면 7:1이라 음표가 너무 작다 */
+.staff--wide svg {
+  width: 100%;
+}
 
 /* verovio는 안쪽 <svg>에 color="black"을 presentation attribute로 박아 넣는다.
    그대로 두면 어두운 테마에서 악보가 배경에 묻힌다. CSS가 presentation
@@ -794,6 +798,102 @@ code {
   font-size: var(--text-xl);
   font-weight: 700;
   margin: 0;
+}
+
+/*
+ * 음계 진행 — "4 / 8". 이름(.given) 바로 아래에 작게 붙는다.
+ * `.progress`는 분석 콘솔이 이미 쓰고 있어 이름을 겹치지 않게 .scale__로 간다.
+ */
+.scale__count {
+  text-align: center;
+  margin: 0;
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.scale__miss {
+  color: var(--color-wrong);
+}
+
+/*
+ * 5도권 원. **자리는 CSS transform으로 놓는다**(ds.Ring 주석) — SVG를 안 들였다.
+ * `.ring__face`가 정사각형이어야 원이 찌그러지지 않는다.
+ */
+.ring {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+}
+.ring__caption {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+}
+.ring__face {
+  position: relative;
+  width: min(300px, 80vw);
+  aspect-ratio: 1;
+  border-radius: 50%;
+  border: 1px dashed var(--color-border);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+/* 자리는 `left`/`top`을 ds가 계산해 넣는다 — 여기서는 모양만 */
+.ring__slot {
+  position: absolute;
+  width: 52px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+/* 주어진 자리 — 여기서 출발한다 */
+.ring__slot--given {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: var(--color-accent-text);
+}
+/* 채워야 할 빈 자리. **점선으로도 말한다** — 색만으로 상태를 말하지 않는다 */
+.ring__slot--active {
+  border-style: dashed;
+  border-color: var(--color-accent);
+  border-width: 2px;
+}
+.ring__slot--empty {
+  opacity: 0.35;
+  border-style: dotted;
+}
+.ring__slot--wrong {
+  border-color: var(--color-wrong);
+  color: var(--color-wrong);
+}
+.ring__direction {
+  margin: 0;
+  font-weight: 600;
+}
+
+/* 조표 — 칸 이름과 입력을 세로로 쌓는다 */
+.keysig__fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  justify-content: center;
+}
+.keysig__field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 140px;
+}
+.keysig__name {
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
 }
 
 /* --- 참고표 --- */

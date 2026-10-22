@@ -28,7 +28,7 @@ from .audio import Audio, MODEL_RATE, write_audio
 STEM_NAMES = ("drums", "bass", "other", "vocals")
 
 #: 오프보컬(인스트루멘털) — 보컬을 뺀 나머지 셋을 더한 파생 스템.
-#: `stems/` 안의 파일 이름이자 웹이 부르는 오디오 이름이다(`roformer.STEM`과 같은 자리).
+#: `stems/` 안의 파일 이름이자 웹이 부르는 오디오 이름이다.
 INST = "inst"
 
 Progress = Callable[[str, float], None]

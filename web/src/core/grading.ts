@@ -12,13 +12,20 @@
 import { GradingMode } from "./config";
 import {
   type IntervalQuestion,
+  type KeyField,
   type Question,
   type StageResponse,
   bassOf,
   isIntervalQuestion,
+  isKeyQuestion,
   isStageResponse,
   responseText,
 } from "./questions";
+import {
+  normalizeKeyName,
+  normalizeLetters,
+  parseSignature,
+} from "./harmony/keys";
 import { noteNames, pitchClasses } from "./theory";
 
 export interface Judgement {
@@ -269,6 +276,97 @@ export class IntervalGrader implements Grader {
   }
 }
 
+/**
+ * 음계 — **순서가 맞고 실수가 0일 때만 정답이다.**
+ *
+ * 안내형 연습이라 틀린 음은 수집기가 애초에 거부한다. 그래서 사용자는 언제나
+ * 여덟 음을 끝까지 치게 되고, 갈리는 것은 **가다가 몇 번 틀렸는가**뿐이다.
+ * 그 값이 `SequenceResponse.mistakes`로 올라온다.
+ *
+ * 순서 검사는 실행 중에는 늘 참이다(거부된 음이 배열에 없으므로). **그래도
+ * 둔다** — 수집기가 깨졌을 때 그것을 잡는 자리가 여기뿐이고, 진단 문구가
+ * "순서가 다르다"로 나오면 버그의 위치가 바로 특정된다.
+ */
+export class ScaleGrader implements Grader {
+  readonly mode = GradingMode.Scale;
+  grade(question: Question, played: unknown): Judgement {
+    const got = responseOf(played, "sequence");
+    if (!got) return answerOnly(question);
+
+    const want = question.answerNotes;
+    if (got.notes.length !== want.length || got.notes.some((n, i) => n !== want[i])) {
+      return {
+        correct: false,
+        detail: `정답: ${question.answerText}\n친 순서가 다릅니다`,
+      };
+    }
+    if (got.mistakes > 0) {
+      return {
+        correct: false,
+        detail:
+          `정답: ${question.answerText}\n` +
+          `끝까지 쳤지만 가는 동안 ${got.mistakes}번 틀렸습니다`,
+      };
+    }
+    return { correct: true, detail: question.answerText };
+  }
+}
+
+/**
+ * 조표·5도권 — **칸마다 따로 본다.**
+ *
+ * 비교 규칙은 문제가 칸마다 들고 있고(`KeyField.kind`), 채점기는 그 규칙대로
+ * 다듬어 `accept` 목록과 맞춰 볼 뿐이다 — **조표를 여기서 다시 계산하지 않는다.**
+ * 계산이 두 곳에 있으면 갈린다.
+ *
+ * 틀렸을 때 **어느 칸이 틀렸는지 짚어 준다.** 두 칸짜리 유형에서 "둘 다 틀렸다"와
+ * "나란한조만 틀렸다"는 다음에 무엇을 복습할지가 다르다.
+ */
+export class KeyFieldGrader implements Grader {
+  readonly mode = GradingMode.KeyField;
+  grade(question: Question, played: unknown): Judgement {
+    const got = responseOf(played, "fields");
+    if (!got || !isKeyQuestion(question)) return answerOnly(question);
+
+    const fields = question.fields;
+    const missed: string[] = [];
+    fields.forEach((field, i) => {
+      if (!matchesField(field, got.values[i] ?? "")) missed.push(field.label);
+    });
+
+    if (missed.length === 0) {
+      return { correct: true, detail: question.answerText };
+    }
+    const which =
+      missed.length === fields.length && fields.length > 1
+        ? "전부"
+        : `${missed.join("·")} 칸이`;
+    return {
+      correct: false,
+      detail: `정답: ${question.answerText}\n${which} 틀렸습니다`,
+    };
+  }
+}
+
+/** 칸 하나를 규칙대로 다듬어 맞춰 본다 */
+function matchesField(field: KeyField, typed: string): boolean {
+  if (field.kind === "letters") {
+    const want = field.accept.map((a) => normalizeLetters(a));
+    const mine = normalizeLetters(typed);
+    // "없음"을 빈칸이나 0으로 적는 것도 받아준다
+    if (want.includes("")) return mine === "" || /^[0-]$/u.test(typed.trim());
+    return mine !== "" && want.includes(mine);
+  }
+  if (field.kind === "signature") {
+    const mine = parseSignature(typed);
+    if (mine === null) return false;
+    return field.accept.some((a) => parseSignature(a) === mine);
+  }
+  const mine = normalizeKeyName(typed);
+  if (mine === "") return false;
+  return field.accept.some((a) => normalizeKeyName(a) === mine);
+}
+
 const GRADERS: Record<GradingMode, () => Grader> = {
   [GradingMode.PitchClass]: () => new PitchClassGrader(),
   [GradingMode.BassNote]: () => new BassNoteGrader(),
@@ -277,6 +375,8 @@ const GRADERS: Record<GradingMode, () => Grader> = {
   [GradingMode.IntervalCount]: () => new IntervalCountGrader(),
   [GradingMode.IntervalQuality]: () => new IntervalQualityGrader(),
   [GradingMode.IntervalForm]: () => new IntervalGrader(),
+  [GradingMode.Scale]: () => new ScaleGrader(),
+  [GradingMode.KeyField]: () => new KeyFieldGrader(),
 };
 
 export function makeGrader(mode: GradingMode): Grader {
