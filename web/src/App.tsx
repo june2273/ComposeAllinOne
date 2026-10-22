@@ -1,207 +1,66 @@
 /**
- * 앱 셸 — 화면 전환과 상태.
+ * 앱 셸 — 도구 둘(분석 콘솔 · PDF 악보)과 설정 창.
  *
- * 활동 종류(catalog.Kind)가 화면을 고른다. quiz가 아니면 전용 화면이 생길
- * 때까지 PlannedPage로 보낸다 — 연주형·도구형을 문항형 화면에 태우는 실수를
- * 구조가 막는다.
+ * 화성학·청음 연습은 Chord-Tutor 저장소로 갈라 나갔다. 여기 남은 것은 연습
+ * 세션이 아니라 도구라서 문제 큐·옵션·결과 화면을 지나지 않는다.
  */
 
-import { useCallback, useRef, useState } from "react";
+import { useRef, useState } from "react";
 
-import { type Activity, Domain, Kind, Status } from "./core/catalog";
 import type { AudioBackend } from "./core/audio";
-import { type PracticeOptions, withOptions } from "./core/config";
 import { makeAudioBackend } from "./platform/piano";
-import type { Result } from "./core/session";
-import { NavBar } from "./ds";
+import { Button, Card, NavBar, PageHeading, Stack } from "./ds";
 import { AnalysisPage } from "./ui/analysis";
 import { PdfScorePage } from "./ui/pdfscore";
-import { FreePlayPage } from "./ui/freeplay";
-import {
-  CatalogPage,
-  HomePage,
-  PlannedPage,
-  QuizPage,
-  ResultPage,
-} from "./ui/pages";
 import { SettingsDialog } from "./ui/settings";
 import { useTheme } from "./ui/useTheme";
 import "./ui/styles/app.css";
 
-type Screen =
-  | { name: "home" }
-  /** 2분할 메뉴. selectedId·options는 일시정지에서 "옵션 설정"으로 돌아올 때 쓴다 */
-  | { name: "catalog"; domain: Domain; selectedId?: string; options?: PracticeOptions }
-  | { name: "activity"; activity: Activity; options: PracticeOptions }
-  | { name: "result"; activity: Activity; options: PracticeOptions; results: Result[] };
-
-/**
- * 활동 하나를 어느 화면에 태울지 고른다.
- *
- * **종류(Kind)가 화면을 고르는 자리는 여기 하나다.** 연주형은 아직 화면이
- * 없으므로 준비 중으로 간다 — 문항형 화면에 태우면 문제 큐·제한시간·정답
- * 판정이 전부 어긋난다.
- *
- * 옵션(제한시간·라운드)이 설정에 얹히는 곳도 여기다. 카탈로그의 `config`는
- * 기본값이고 실제로 도는 것은 `withOptions()`가 만든 사본이다.
- */
-function ActivityScreen({
-  activity,
-  options,
-  run,
-  audio,
-  onFinished,
-  onOptions,
-}: {
-  activity: Activity;
-  options: PracticeOptions;
-  run: number;
-  audio: AudioBackend;
-  onFinished: (results: Result[]) => void;
-  onOptions: () => void;
-}) {
-  if (activity.status === Status.Planned) return <PlannedPage activity={activity} />;
-  // 도구는 종류만으로 못 고른다 — 저마다 다른 것을 다루는 별개의 화면이라
-  // 공통 틀이 없다(문항형이 `config`로 하나의 화면을 공유하는 것과 갈리는 자리다).
-  // 모르는 도구는 준비 중으로 보낸다: 카탈로그에 올렸는데 화면을 안 만든 경우다.
-  if (activity.kind === Kind.Tool) {
-    if (activity.id === "analysis.console") return <AnalysisPage audio={audio} />;
-    if (activity.id === "analysis.pdf") return <PdfScorePage />;
-    return <PlannedPage activity={activity} />;
-  }
-  // 자유 연주는 세션이 아니다 — 옵션(제한시간·라운드)도 결과 화면도 지나지 않는다.
-  if (activity.kind === Kind.Free) return <FreePlayPage audio={audio} />;
-  if (activity.kind === Kind.Quiz && activity.config) {
-    return (
-      <QuizPage
-        key={`${activity.id}#${run}`}
-        config={withOptions(activity.config, options)}
-        audio={audio}
-        onFinished={onFinished}
-        onOptions={onOptions}
-      />
-    );
-  }
-  return <PlannedPage activity={activity} />;
-}
+const TOOLS = {
+  console: {
+    title: "분석 콘솔",
+    summary: "오디오 파일 하나를 열면 분석과 변환을 한자리에서.",
+  },
+  pdf: {
+    title: "PDF 악보",
+    summary: "가지고 있는 PDF 악보를 열어 본다. 파일은 브라우저 밖으로 나가지 않는다.",
+  },
+} as const;
+type Tool = keyof typeof TOOLS;
 
 export default function App() {
-  // 피아노 샘플을 배경에서 받는다. 준비 전에는 사인 신스로 난다.
-  //
-  // **useMemo를 쓰면 안 된다**(실측). StrictMode가 팩토리를 두 번 부르는데,
-  // 오디오 백엔드는 AudioContext와 1.3MiB 샘플을 들고 있어서 버려지는 쪽도
-  // 자원을 그대로 잡는다 — 샘플을 두 번 내려받는 것을 네트워크 로그로 확인했다.
-  // ref는 두 번째 호출 자체가 일어나지 않는다.
+  // **useMemo를 쓰면 안 된다**(실측). StrictMode가 팩토리를 두 번 불러
+  // AudioContext와 샘플 1.3MiB를 두 벌 잡는다. ref는 두 번째 호출이 없다.
   const audioRef = useRef<AudioBackend | null>(null);
   audioRef.current ??= makeAudioBackend();
   const audio = audioRef.current;
-  const [screen, setScreen] = useState<Screen>({ name: "home" });
-  // "한 번 더"가 세션을 새로 만들도록 강제하는 키
-  const [run, setRun] = useState(0);
-  // **설정은 화면(Screen)이 아니라 그 위에 뜨는 창이다.** 화면으로 두면 뒤로가기
-  // 경로에 끼어들고, 어느 화면에서 열었는지를 기억해야 한다.
+  const [tool, setTool] = useState<Tool | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const { theme, dark, setTheme } = useTheme();
 
-  const openActivity = useCallback(
-    (activity: Activity, options: PracticeOptions) => {
-      setRun((n) => n + 1);
-      setScreen({ name: "activity", activity, options });
-    },
-    [],
-  );
-
-  /** 일시정지 → 옵션 설정. 고른 항목과 값을 그대로 들고 메뉴로 돌아간다. */
-  const openOptions = useCallback(() => {
-    setScreen((current) =>
-      current.name === "activity"
-        ? {
-            name: "catalog",
-            domain: current.activity.domain,
-            selectedId: current.activity.id,
-            options: current.options,
-          }
-        : current,
-    );
-  }, []);
-
-  const goBack = useCallback(() => {
-    setScreen((current) => {
-      if (current.name === "home") return current;
-      if (current.name === "catalog") return { name: "home" };
-      return {
-        name: "catalog",
-        domain: current.activity.domain,
-        selectedId: current.activity.id,
-        options: current.options,
-      };
-    });
-  }, []);
-
-  const onFinished = useCallback(
-    (results: Result[]) => {
-      setScreen((current) =>
-        current.name === "activity"
-          ? {
-              name: "result",
-              activity: current.activity,
-              options: current.options,
-              results,
-            }
-          : current,
-      );
-    },
-    [],
-  );
-
-  const path: string[] =
-    screen.name === "home"
-      ? []
-      : screen.name === "catalog"
-        ? [screen.domain]
-        : screen.name === "activity"
-          ? [screen.activity.domain, screen.activity.title]
-          : [screen.activity.domain, screen.activity.title, "결과"];
-
   return (
     <div className="app">
-      <NavBar path={path} onBack={goBack} />
+      <NavBar path={tool ? [TOOLS[tool].title] : []} onBack={() => setTool(null)} />
 
-      {screen.name === "home" && (
-        <HomePage
-          onPick={(domain) => setScreen({ name: "catalog", domain })}
-          onSettings={() => setSettingsOpen(true)}
-        />
+      {tool === null && (
+        <Stack>
+          <PageHeading title="무엇을 열까요" center />
+          {(Object.keys(TOOLS) as Tool[]).map((id) => (
+            <Card
+              key={id}
+              title={TOOLS[id].title}
+              summary={TOOLS[id].summary}
+              onClick={() => setTool(id)}
+            />
+          ))}
+          <div className="home__footer">
+            <Button onClick={() => setSettingsOpen(true)}>설정</Button>
+          </div>
+        </Stack>
       )}
 
-      {screen.name === "catalog" && (
-        <CatalogPage
-          domain={screen.domain}
-          selectedId={screen.selectedId}
-          initialOptions={screen.options}
-          onStart={openActivity}
-        />
-      )}
-
-      {screen.name === "activity" && <ActivityScreen
-        activity={screen.activity}
-        options={screen.options}
-        run={run}
-        audio={audio}
-        onFinished={onFinished}
-        onOptions={openOptions}
-      />}
-
-      {screen.name === "result" && (
-        <ResultPage
-          results={screen.results}
-          total={screen.options.rounds ?? screen.results.length}
-          onRestart={() => openActivity(screen.activity, screen.options)}
-          onBackToCatalog={() =>
-            setScreen({ name: "catalog", domain: screen.activity.domain })
-          }
-        />
-      )}
+      {tool === "console" && <AnalysisPage audio={audio} />}
+      {tool === "pdf" && <PdfScorePage />}
 
       {settingsOpen && (
         <SettingsDialog
