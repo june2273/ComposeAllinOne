@@ -1,15 +1,17 @@
-# 화성학·청음 연습 앱 (React + Vite)
+# ComposeAllinOne 웹 (React + Vite)
 
-원래 PySide6 데스크톱 앱이었고 2026-08-03에 웹만 남겼다. Python판 코드가
-필요하면 커밋 `10abd90`에 있다.
+분석 콘솔과 PDF 악보 뷰어다. 화성학·청음 연습은 2026-10-22에
+[Chord-Tutor](https://github.com/june2273/Chord-Tutor)로 갈라 나갔다(분리 직전
+상태는 태그 `pre-split`).
 
 `scripts/`의 Python 셋은 **빌드 타임에 피아노 자산을 굽는 도구**다 — 앱이
-실행 중에 Python을 부르는 곳은 없다.
+실행 중에 Python을 부르는 곳은 없다. `scripts/eval/`과 `scripts/eval_*.py`는
+평가 하니스다(앱에 안 들어간다).
 
 ```bash
 npm install
-npm run dev      # http://localhost:5173
-npm test         # 이론·세션·UI·MIDI·오디오·피아노·분석·전사 (9파일 207개)
+npm run dev      # http://localhost:5173 — server/.venv가 있으면 사이드카도 함께 띄운다
+npm test         # 431개
 npm run build
 ```
 
@@ -18,75 +20,53 @@ npm run build
 ```
 src/
   core/        React도 브라우저 API도 모르는 순수 로직
-    theory.ts      음이름·음고류·Pitch·Interval
-    config.ts      난이도 8축 + 프리셋
-    catalog.ts     활동 목록 (무엇을 연습·분석할 수 있는가)
-    questions.ts   문제 생성기 (Strategy)
-    grading.ts     채점기 5종 (Strategy)
-    session.ts     세션 상태 기계
-    score.ts       verovio 악보
-    audio.ts       Web Audio 백엔드
-    analysis/      오디오 분석 — 의존성 없는 DSP
-      fft.ts         FFT + STFT 프레임 (직접 구현)
-      features.ts    SuperFlux ODF · 크로마 · 조율 추정
-      tempo.ts       자기상관 템포 + DP 비트 추적
-      meter.ts       박자표 (축A 세분화 × 축B 마디당 박)
-      key.ts         Krumhansl–Schmuckler 조성
-    transcribe/    f0 커브 → 음표 → MIDI·악보. 모델을 부르지 않는다
-      notes.ts       Viterbi로 음표 자르기 (비브라토·옥타브 점프에 강하다)
-      quantize.ts    비트 격자에 얹기 (반올림이 아니라 메트리컬 DP)
-      midi.ts        SMF 쓰기 (의존성 없이 직접)
-      musicxml.ts    멜로디 한 줄 MusicXML
-  platform/    브라우저가 어떻게 하는가. 음악적 판단 없음.
-    midi.ts        Web MIDI — 포트 선택·메시지 해석
-    piano.ts       샘플 피아노 (없으면 사인으로 폴백)
-    analyze.ts     오디오 디코딩 + 분석 워커
-    analysis.worker.ts
-    sidecar.ts     로컬 분석 서버 (없으면 그 칸만 잠긴다)
+    analysis/      박자·조성·코드·구간 — 의존성 없는 DSP (FFT까지 직접)
+    transcribe/    f0 커브 → 음표 → MIDI·MusicXML·.svp. 모델을 부르지 않는다
+    drums/         드럼 스템 → 타점 → 루프·필인 → 타악보·채널10 MIDI
+    score.ts       verovio 악보 (SVG·타임맵·인쇄용 쪽)
+    audio.ts       AudioBackend 인터페이스
+    theory.ts · config.ts · harmony/   음 이름과 PlayMode 등 오디오·악보가 쓰는 것
+  platform/    브라우저가 어떻게 하는가. 음악적 판단 없음
+    analyze.ts · analysis.worker.ts   오디오 디코딩 + 분석 워커
+    sidecar.ts     로컬 분석 서버와 HTTP (감지·업로드·폴링·취소)
+    piano.ts · synth.ts               샘플 피아노 (없으면 사인으로 폴백)
+    clip.ts        구간 반복 재생
+    print.ts       숨긴 iframe → 브라우저 인쇄 → PDF
+    midi.ts · theme.ts
   ds/          디자인 시스템 — 도메인을 모르는 표시 부품
   ui/
-    useSession.ts  타이머·입력을 Session에 잇는 훅 (문항형 전용)
-    useMidi.ts     MIDI를 React 수명주기에 붙이는 훅
-    pages.tsx      홈 / 목록 / 문항형 / 준비 중 / 결과
-    stages.tsx     스테이지별 문제 표시 + 답 입력
-    analysis.tsx   분석 콘솔 (도구형)
-    transcription.tsx  분석 콘솔의 AI 칸 (스템·멜로디·악보)
-    components.tsx NavBar · Card · Staff
-    styles/
-      tokens.css   ← 브랜딩이 바뀔 때 손대는 유일한 파일
-      app.css      컴포넌트 스타일 (값은 전부 토큰을 거친다)
-scripts/       빌드 타임 자산 도구 (Python)
-  download_assets.py   원본 음원 내려받기
-  sfz.py               SFZ 파서
-  prepare_web_piano.py 웹용 AAC + 매니페스트로 굽기
+    analysis.tsx       분석 콘솔
+    transcription.tsx  AI 칸 (스템·멜로디·악보·내려받기)
+    scoreplayer.tsx    전사 악보 재생·커서·인쇄
+    chords.tsx · structure.tsx · drums.tsx
+    pdfscore.tsx       PDF 악보 뷰어
+    settings.tsx       설정 창 (테마·MIDI 장치)
+    styles/tokens.css  ← 브랜딩이 바뀔 때 손대는 유일한 파일
 ```
 
-무거운 모델은 저장소 루트의 `server/`(별도 프로세스)에 있다 — 아래 참조.
-
 의존성은 한 방향으로만 흐른다: `ui/` → `platform/` → `core/` → (없음).
-`core/`는 React도 브라우저 API도 import하지 않고, `platform/`은 음악적 판단을
-하지 않는다 — 그래서 브라우저 없이 테스트가 돈다.
+`core/analysis`와 `core/transcribe`는 서로를 import하지 않는다 — 잇는 것은 위층의 일이다.
 
-## 분석 사이드카 (선택)
+## 분석 사이드카
 
-스템 분리와 멜로디 f0는 학습된 모델이라 브라우저 안에서 끝나지 않는다. 로컬
-파이썬 서버가 맡는다. **파이썬 3.11이어야 한다**(3.14에서 basic-pitch가 깨진다).
+스템 분리(htdemucs)·멜로디 f0(RMVPE)·비트(Beat This!)는 학습된 모델이라 브라우저
+안에서 끝나지 않는다. `../server/`의 로컬 파이썬 서버가 맡는다. **파이썬 3.11이어야
+한다**(torch 계열이 새 파이썬을 늦게 따라온다).
 
 ```bash
 cd ../server
 python3.11 -m venv .venv
 .venv/bin/pip install -r requirements.txt   # torch 때문에 수 GB
-.venv/bin/uvicorn app.main:app --port 8420
 ```
 
-**안 띄워도 앱은 뜬다** — 분석 콘솔의 BPM·박자·조성은 그대로 나오고 AI 칸만
-잠긴 채 실행 방법을 보여준다. 피아노 음원과 같은 방침이다.
+**2026-09-12부터 BPM·박자가 사이드카에서 나온다** — 그래서 분석 콘솔은 사이드카가
+켜져 있어야 제대로 돈다. 개발 중에는 `npm run dev`가 함께 띄우고(`vite-sidecar.ts`,
+끄려면 `SIDECAR_AUTOSTART=0`), 빌드된 앱은 사이드카가 직접 서빙한다.
 
 서버는 기동 직후 모델을 한 번씩 굴려 보고(`app/health.py`), **안 깔린 것과
-깔렸는데 안 도는 것을 갈라서** 화면에 알려준다 — 뒤쪽에는 `pip install` 대신
-무엇이 터졌는지가 나온다.
+깔렸는데 안 도는 것을 갈라서** 화면에 알려준다.
 
-서버가 하는 것은 신호 처리뿐이다(스템 WAV + f0 커브). 음표로 자르고 격자에
+서버가 하는 것은 신호 처리뿐이다(스템 WAV + f0 커브 + 비트). 음표로 자르고 격자에
 얹고 MIDI·악보로 만드는 것은 전부 `src/core/transcribe/`라, **모델을 갈아끼워도
 웹은 안 바뀐다.**
 
@@ -113,30 +93,14 @@ python3.11 -m venv .venv
 녹음 그대로**다. 보정을 끄려면 `prepare_web_piano.py`의 `tuning_table()`이 빈
 표를 주게 하면 된다.
 
-## MIDI 입력
-
-**Chrome·Edge에서 건반이 바로 된다.** Safari·Firefox에는 Web MIDI가 없어서
-자판 폴백으로 떨어지고, 그 사실을 화면 위 한 줄로 알려준다.
-
-컨트롤러 하나가 포트를 여럿 내보내는 경우가 많은데, KeyLab의 `MCU/HUI` 포트는
-트랜스포트 버튼을 노트 메시지로 보내 **오답을 유발한다.** `platform/midi.ts`의
-`PORT_AVOID`가 이런 포트를 거른다.
-
-MIDI와 자판 폴백은 `stages.usesMidiInput()` **하나로 함께** 켜지고 꺼진다.
-음정 스테이지는 숫자·성질 키를 쓰므로 둘 다 꺼진다. 조건을 두 곳에 두면 건반
-입력이 음정 채점기로 흘러들어간다.
-
 ## 분석 콘솔
 
-오디오 파일을 열면 **BPM · 박자 · 조성**이 나온다. 이 셋은 전부 브라우저 안에서
-돌고 파일은 어디로도 올라가지 않는다. **라이브러리를 쓰지 않는다 — FFT까지 직접
-짰다**(`core/analysis/`). DSP는 워커에서 돌려 화면을 막지 않는다.
+오디오 파일을 열면 **BPM · 박자 · 조성**과 구간이 나오고, 사이드카가 스템 분리 ·
+멜로디 전사(악보 · MIDI · Synthesizer V `.svp`) · 드럼 루프와 필인을 붙인다.
+파일은 로컬 서버까지만 간다(바깥으로는 나가지 않는다).
 
-사이드카를 띄우면 여기에 **스템 분리 · 멜로디 전사(악보 · MIDI)**가 붙는다. 그때는
-파일이 로컬 서버로 간다(바깥으로는 나가지 않는다).
-
-없는 것: 코드 인식, 구조 분석(섹션 경계), 그리고 변박·전조·변속 — 뒤의 둘은 구간을
-나누는 문제라 구조 분석이 먼저다. 곡 전체를 한 덩어리로 본다.
+**코드 인식은 돌지만 화면에서 닫아 두었다** — 코드 정답을 찍어 둔 곡이 없어
+정확도를 말할 수 없다. 스위치는 `ui/chords.tsx`의 `CHORDS_VISIBLE` 하나다.
 
 알고리즘 출처는 [../citation.md](../citation.md) 3-1절 — 논문을 읽고 새로
 구현했지 코드를 옮기지 않았다.
@@ -150,10 +114,6 @@ MIDI와 자판 폴백은 `stages.usesMidiInput()` **하나로 함께** 켜지고
 ```bash
 npm run build:ds   # dist-ds/{index.js, index.d.ts, index.css}
 ```
-
-부품 18개: `Button` `Badge` `Card` `NavBar` `PageHeading` `Stack` `DeviceStatus`
-`SessionHeader` `TimerBar` `Verdict` `NumberField` `ChoiceRow` `Hint`
-`StaffFigure` `ScoreRow` `ScoreSummary` `SpecSection` `PlannedNotice`
 
 지켜야 할 규칙 셋 (`src/ds/index.tsx` 머리말에도 적어 뒀다):
 
@@ -196,22 +156,7 @@ npm run build:ds   # dist-ds/{index.js, index.d.ts, index.css}
 
 ## 아직 없는 것
 
-- **Safari·Firefox의 MIDI** — Web MIDI가 없다. Tauri를 붙일 때 네이티브로
-  읽는다. 그 브라우저에서는 자판 `A W S E D F T G Y H U J K` = C4~C5 폴백.
-- 카탈로그 17개 중 12개 — `catalog.ts`의 `requires`에 각각 무엇이 필요한지
-  적혀 있고, 앱에서 그 활동을 열면 그대로 화면에 나온다.
-- **분석 쪽의 평가셋** — 지금 테스트가 보증하는 것은 "알고리즘이 의도대로 도는가"
-  까지다. 전사 임계값들도 합성 신호로만 확인했다. 실곡과 채보 정답이 필요하다.
-
-## Python판에서 옮겨오며 사라진 것
-
-계산 규칙은 한 줄도 바꾸지 않았다(같은 테스트 케이스로 검증). 사라진 것은
-Qt 때문에 필요했던 우회들이다. 새로 짤 때 되살리지 말 것.
-
-| Python/Qt에서 필요했던 것 | 웹에서 |
-|---|---|
-| MIDI 콜백 → Qt 시그널 (스레드 경계) | `midimessage`가 메인 스레드로 온다 |
-| verovio 중첩 `<svg>` 평탄화 | 브라우저가 그냥 처리 |
-| 오선에 `stroke` 주입 | `<style>`이 그대로 먹는다 |
-| 종횡비 유지용 커스텀 위젯 | `viewBox` + CSS 두 줄 |
-| GIL 회피용 "미리 렌더 후 던지기" | Web Audio가 오디오 스레드에서 스케줄 |
+- **코드·드럼·구간의 정확도** — 정답을 찍어 둔 곡이 없다. 지금 테스트가 보증하는
+  것은 "알고리즘이 의도대로 도는가"까지다.
+- **변박·전조·변속** — 구간은 생겼고, 구간마다 다시 재는 일이 남았다.
+- 셋잇단·스윙 표기, 성부 분리. 전사 악보는 손봐야 하는 초안이다.
