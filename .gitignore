@@ -19,3 +19,6 @@ server/models/
 
 # 강의 PDF 등 외부 문서는 커밋하지 않는다 (citation.md 규칙)
 *.pdf
+
+# 평가셋(곡 목록·정답 채보)은 저작권 때문에 공개하지 않는다. 로컬에만 둔다.
+/evalset/
