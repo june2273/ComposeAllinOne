@@ -1,5 +1,3 @@
-[한국어](README.ko.md)
-
 # ComposeAllinOne
 
 Open one pop recording and get tempo, meter and key, separated stems, the vocal melody as MIDI / MusicXML / a Synthesizer V project, and the drum part as loops and fills.
@@ -43,6 +41,13 @@ Measured against the author's own hand transcriptions. The set is small (5 songs
 
 Chord recognition runs but is hidden in the UI: there is no chord ground truth yet, so its accuracy is unknown.
 
+## Tech stack
+
+- Web app: TypeScript, React 19, Vite, vitest; verovio for notation
+- Sidecar: Python 3.11, FastAPI, PyTorch
+- Models: htdemucs (stems), RMVPE (vocal f0), Beat This! (beats), All-In-One (sections)
+- Own DSP in TypeScript: FFT/STFT, key and meter estimation, Viterbi note tracking, metrical quantization
+
 ## Run
 
 ```bash
@@ -68,7 +73,7 @@ Piano samples are not in the repo. Without them playback falls back to a sine sy
 .venv/bin/python web/scripts/prepare_web_piano.py   # needs ffmpeg
 ```
 
-## Limitations and lessons
+## Lessons learned
 
 - High notes are still partly lost. Above C5 the model's own confidence collapses, and about half the missing notes never form at all; it isn't an octave error. Dead ends are written up in `docs/고음_f0_미해결.md`.
 - 2/4 is never output (it was almost always a tempo error in this set). Tuplets and swing aren't notated, and the transcribed score is a draft that needs editing.
@@ -84,3 +89,6 @@ Studied with J. Nam's public course materials: CTP431 / GCT731.
 - verovio (LGPL-3.0), Upright Piano KW sample set (CC0)
 
 Full sources, licenses and where each is used: [citation.md](citation.md).
+
+---
+한국어 문서: [README.ko.md](README.ko.md)
