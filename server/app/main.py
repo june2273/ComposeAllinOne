@@ -60,7 +60,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     yield
 
 
-app = FastAPI(title="musictest analysis sidecar", version=VERSION, lifespan=lifespan)
+app = FastAPI(title="ComposeAllinOne analysis sidecar", version=VERSION, lifespan=lifespan)
 
 # 로컬 개발 서버에서만 부른다. 이 서버는 사용자의 파일을 다루므로 아무 곳에나
 # 열어 둘 이유가 없다 — 배포 형태가 정해지면 여기부터 다시 볼 것.

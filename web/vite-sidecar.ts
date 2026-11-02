@@ -118,7 +118,7 @@ export function sidecar(): Plugin {
   };
 
   return {
-    name: "musictest:sidecar",
+    name: "compose-allinone:sidecar",
     apply: "serve",
 
     configureServer(server) {
