@@ -2,6 +2,11 @@
 
 Open one pop recording and get tempo, meter and key, separated stems, the vocal melody as MIDI / MusicXML / a Synthesizer V project, and the drum part as loops and fills.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/stack-dark.png">
+  <img src="docs/stack.png" alt="A musician opens a recording in the React web app; the app sends audio to a local FastAPI sidecar that runs PyTorch models and returns stems, f0 and beats; TypeScript core modules for analysis, transcription and drums turn them into MIDI, MusicXML and Synthesizer V exports" width="100%">
+</picture>
+
 ## Problem
 
 Turning a mixed recording into a usable vocal score breaks in a few predictable places:
@@ -47,6 +52,7 @@ Chord recognition runs but is hidden in the UI: there is no chord ground truth y
 - Sidecar: Python 3.11, FastAPI, PyTorch
 - Models: htdemucs (stems), RMVPE (vocal f0), Beat This! (beats), All-In-One (sections)
 - Own DSP in TypeScript: FFT/STFT, key and meter estimation, Viterbi note tracking, metrical quantization
+- Diagram: [stack-diagram](https://github.com/caru-ini/stack-diagram) (icons: svgl, devicon, Lucide)
 
 ## Run
 

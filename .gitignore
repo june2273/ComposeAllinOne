@@ -22,3 +22,10 @@ server/models/
 
 # 평가셋(곡 목록·정답 채보)은 저작권 때문에 공개하지 않는다. 로컬에만 둔다.
 /evalset/
+
+# secrets
+.env
+.env.*
+!.env.example
+.dev.vars
+.wrangler/

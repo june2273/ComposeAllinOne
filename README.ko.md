@@ -4,6 +4,11 @@
 
 팝 음원 하나를 열면 템포·박자·조성, 분리된 스템, 보컬 멜로디(MIDI · MusicXML · Synthesizer V 프로젝트), 드럼 루프와 필인이 나온다.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/stack-dark.png">
+  <img src="docs/stack.png" alt="음원을 React 웹앱에서 열면 로컬 FastAPI 사이드카가 PyTorch 모델로 스템·f0·박을 돌려주고, 브라우저의 TypeScript 코어(analysis, transcribe, drums)가 이를 MIDI·MusicXML·Synthesizer V 파일로 만드는 구조" width="100%">
+</picture>
+
 ## 구성
 
 학습된 모델은 로컬 파이썬 사이드카(`server/`)에만 두고, 음악적 판단은 전부 브라우저 쪽 TypeScript 순수 로직(`web/src/core/`)이 한다. 모델을 바꿔도 웹 코드는 그대로다.
